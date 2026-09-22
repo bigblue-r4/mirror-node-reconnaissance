@@ -1,0 +1,7 @@
+/target
+# Cargo.lock IS committed — this workspace ships a binary (reproducible builds).
+# runtime witness logs
+/mnr-run
+**/*.rs.bk
+# local, non-example config
+/configs/mnr.toml

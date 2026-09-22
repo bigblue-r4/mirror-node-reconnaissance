@@ -1,0 +1,12 @@
+[package]
+name = "mnr-observer"
+description = "Sandboxed split-brain observer node: a Proposer characterizes swarm traffic while a Verifier independently audits it and scores co-option drift."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+mnr-ledger = { workspace = true }

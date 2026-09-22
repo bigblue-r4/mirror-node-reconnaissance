@@ -1,0 +1,10 @@
+[package]
+name = "mnr-sim"
+description = "A self-contained, seeded synthetic 'adversarial swarm' — the only SwarmConnector shipped, so the whole system demonstrates in a sealed lab."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+mnr-observer = { workspace = true }

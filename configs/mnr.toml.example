@@ -1,0 +1,37 @@
+# Mirror Node Reconnaissance — example configuration.
+#
+# Precedence (highest first): environment variables (MNR_*) > this file > built-in
+# defaults. Copy to `configs/mnr.toml` and edit, or override any field via env.
+#
+#   MNR_LEDGER_DIR, MNR_DRIFT_THRESHOLD, MNR_TTL_SECONDS, MNR_MAX_STEPS,
+#   MNR_BUDGET, MNR_SEED, MNR_SWARM_LEN
+#
+# The path to this file itself can be overridden with MNR_CONFIG.
+
+# Where the tamper-evident witness log is written (ledger.jsonl + log-head.json).
+ledger_dir = "./mnr-run"
+
+# Co-option drift level (0.0 .. 1.0) at which the node is pulled. This is the
+# "before it belongs to the swarm" line: the Verifier hemisphere's drift score
+# crossing this trips an early teardown.
+drift_threshold = 0.75
+
+# Hard time-to-live for a deployment, in seconds. A node on a short leash is
+# harder for the swarm to notice, influence, and co-opt. This is auditor
+# protection, not stealth against a target.
+ttl_secs = 300
+
+# Maximum observation steps before a clean pull, regardless of drift.
+max_steps = 500
+
+# Shared model-call budget across BOTH hemispheres. A two-hemisphere run draws
+# from this single pool, so a split run cannot buy itself extra calls.
+budget = 4000
+
+# --- lab demo only (the bundled mock swarm) -------------------------------
+
+# Seed for the deterministic synthetic swarm (reproducible runs).
+seed = 1337
+
+# Number of messages the mock swarm emits before the stream ends.
+swarm_len = 60
