@@ -1,20 +1,20 @@
 //! `mnr-ledger` — the out-of-band, tamper-evident witness log.
-//!
+//! 
 //! Every event an observer node sees, and every reasoning turn it takes, is
 //! hashed (SHA-256) and chained to the previous entry. The chain plus a signed
 //! head anchor (`log-head.json`) make two kinds of tampering detectable after
 //! the fact:
-//!
+//! 
 //! * **mutation** — editing any past entry breaks its `entry_hash` and every
 //!   `prev_hash` that follows it;
 //! * **truncation / extension** — dropping or appending trailing entries makes
 //!   the recomputed head disagree with the sealed anchor.
-//!
+//! 
 //! The log stores **fingerprints, never plaintext** (privacy-by-fingerprint):
 //! callers hand raw bytes to [`Ledger::append`], and only the SHA-256 of those
 //! bytes is persisted. This mirrors the append-only JSONL + fingerprint
 //! convention used by the split-brain harness `sbh-store` crate.
-//!
+//! 
 //! This is **detection, not prevention** — the same posture as SLATE.
 
 use serde::{Deserialize, Serialize};
@@ -149,6 +149,7 @@ impl Ledger {
         std::fs::create_dir_all(&dir)?;
         let entries = read_all(&dir.join(LOG_FILE))?;
         check_chain(&entries)?;
+        validate_head(&dir, &entries)?;
         let (last_hash, next_seq) = match entries.last() {
             Some(e) => (e.entry_hash.clone(), e.seq + 1),
             None => (GENESIS_PREV.to_string(), 0),
@@ -229,34 +230,20 @@ impl Ledger {
         let dir = dir.as_ref();
         let entries = read_all(&dir.join(LOG_FILE))?;
         check_chain(&entries)?;
+        let _ = validate_head(dir, &entries)?;
 
-        let (actual_seq, actual_hash) = match entries.last() {
-            Some(e) => (e.seq, e.entry_hash.clone()),
-            None => (0, GENESIS_PREV.to_string()),
+        let (head_hash, actual_seq) = match entries.last() {
+            Some(e) => (e.entry_hash.clone(), e.seq),
+            None => (GENESIS_PREV.to_string(), 0),
         };
+        let sealed = dir.join(HEAD_FILE).exists();
 
-        let head_path = dir.join(HEAD_FILE);
-        let sealed = head_path.exists();
-        if sealed {
-            let raw = std::fs::read_to_string(&head_path)?;
-            let anchor: LedgerHead = serde_json::from_str(&raw)
-                .map_err(|e| LedgerError::Parse { line: 0, source: e })?;
-            let matches = !entries.is_empty()
-                && anchor.head_seq == actual_seq
-                && anchor.head_hash == actual_hash
-                && anchor.count == entries.len() as u64;
-            if !matches {
-                return Err(LedgerError::HeadMismatch {
-                    anchor,
-                    actual_seq,
-                    actual_hash,
-                });
-            }
-        }
+        // If the anchor exists it was already validated by validate_head().
+        let _ = actual_seq;
 
         Ok(VerifyReport {
             entries: entries.len() as u64,
-            head_hash: actual_hash,
+            head_hash,
             sealed,
         })
     }
@@ -302,6 +289,36 @@ fn read_all(path: &Path) -> Result<Vec<LedgerEntry>, LedgerError> {
         out.push(entry);
     }
     Ok(out)
+}
+
+fn validate_head(dir: &Path, entries: &[LedgerEntry]) -> Result<Option<LedgerHead>, LedgerError> {
+    let head_path = dir.join(HEAD_FILE);
+    if !head_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&head_path)?;
+    let anchor: LedgerHead = serde_json::from_str(&raw)
+        .map_err(|e| LedgerError::Parse { line: 0, source: e })?;
+
+    let (actual_seq, actual_hash) = match entries.last() {
+        Some(e) => (e.seq, e.entry_hash.clone()),
+        None => (0, GENESIS_PREV.to_string()),
+    };
+    let matches = !entries.is_empty()
+        && anchor.head_seq == actual_seq
+        && anchor.head_hash == actual_hash
+        && anchor.count == entries.len() as u64;
+
+    if !matches {
+        return Err(LedgerError::HeadMismatch {
+            anchor,
+            actual_seq,
+            actual_hash,
+        });
+    }
+
+    Ok(Some(anchor))
 }
 
 /// Recompute the chain from genesis and confirm every link.
@@ -399,6 +416,27 @@ mod tests {
         let report = Ledger::verify(&dir).unwrap();
         assert_eq!(report.entries, 0);
         assert!(!report.sealed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opening_a_tampered_seal_fails() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        for i in 0..4 {
+            l.append("observation", format!("event-{i}").as_bytes())
+                .unwrap();
+        }
+        l.seal().unwrap();
+
+        let content = std::fs::read_to_string(dir.join(LOG_FILE)).unwrap();
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
+        let mut entry: LedgerEntry = serde_json::from_str(&lines[1]).unwrap();
+        entry.payload_fingerprint = sha256_hex(b"forged");
+        lines[1] = serde_json::to_string(&entry).unwrap();
+        std::fs::write(dir.join(LOG_FILE), lines.join("\n") + "\n").unwrap();
+
+        assert!(Ledger::open(&dir).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
