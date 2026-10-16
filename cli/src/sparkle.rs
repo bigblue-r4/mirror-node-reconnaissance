@@ -12,7 +12,7 @@
 //! 5. The final aggregate ledger is a standard `mnr-ledger` JSONL log that can be
 //!    verified with `mnr ledger verify`.
 
-use mnr_ledger::{Ledger, LedgerHead};
+use mnr_ledger::Ledger;
 use mnr_observer::{MeteredEngine, MockEngine, Observer, SwarmConnector};
 use mnr_reaper::{execute_teardown, NodeState, Reaper, Secret, TripReason};
 use mnr_sim::MockSwarm;
@@ -110,10 +110,7 @@ impl SparkleConfig {
                         .map_err(|_| "invalid --seed value")?;
                 }
                 "--dir" => {
-                    cfg.dir = it
-                        .next()
-                        .ok_or("--dir requires a value")?
-                        .to_string();
+                    cfg.dir = it.next().ok_or("--dir requires a value")?.to_string();
                 }
                 _ => {
                     return Err(format!("unknown sparkle option: {arg}"));
@@ -166,7 +163,7 @@ pub struct ProbeResult {
     pub final_drift: f64,
     pub steps: u64,
     pub trip_reason: String,
-    pub fragment_hash: String,       // SHA-256 of sealed ledger.jsonl
+    pub fragment_hash: String, // SHA-256 of sealed ledger.jsonl
     pub sealed_at: String,
 }
 
@@ -175,7 +172,7 @@ pub struct ProbeResult {
 pub struct SparkleAggregation {
     pub num_probes: u32,
     pub fragments: Vec<ProbeResult>,
-    pub aggregation_root: String,    // Merkle root over fragment_hashes
+    pub aggregation_root: String, // Merkle root over fragment_hashes
     pub sealed_at: String,
 }
 
@@ -228,12 +225,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
-}
-
-/// Hash of a file's contents.
-fn hash_file(path: &Path) -> Result<String, String> {
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    Ok(sha256_hex(&bytes))
 }
 
 /// Canonical hash of a ledger directory: hash(ledger.jsonl || log-head.json).
@@ -359,12 +350,7 @@ impl SparkleController {
     }
 
     /// Run a single probe to completion.
-    fn run_probe(
-        &self,
-        probe_id: u32,
-        seed: u64,
-        probe_dir: &Path,
-    ) -> Result<ProbeResult, String> {
+    fn run_probe(&self, probe_id: u32, seed: u64, probe_dir: &Path) -> Result<ProbeResult, String> {
         // Open ledger for this probe
         let mut ledger = Ledger::open(probe_dir).map_err(|e| e.to_string())?;
 
@@ -386,11 +372,7 @@ impl SparkleController {
         let mut steps: u64 = 0;
         let mut final_drift = 0.0;
         {
-            let mut observer = Observer::new(
-                engine,
-                &mut ledger,
-                self.config.drift_threshold,
-            );
+            let mut observer = Observer::new(engine, &mut ledger, self.config.drift_threshold);
 
             loop {
                 // Check TTL
@@ -547,8 +529,7 @@ pub fn verify_sparkle_aggregation(dir: &str) -> Result<VerifyReport, String> {
     let root_file = agg_dir.join("aggregate-root.json");
     let root_hash = if root_file.exists() {
         let raw = fs::read_to_string(&root_file).map_err(|e| e.to_string())?;
-        let meta: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let meta: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
         meta["aggregation_root"]
             .as_str()
             .map(|s| s.to_string())

@@ -1,12 +1,12 @@
 //! `mnr` — Mirror Node Reconnaissance command line.
-//! 
+//!
 //! Subcommands:
 //!   demo            Run the observer against the bundled mock swarm, then seal
 //!                   and verify the witness log.
 //!   sparkle         Run the sealed-lab multi-probe sparkle demo.
 //!   ledger verify   Verify the integrity of a witness log on disk.
 //!   ledger show     Print a short summary of a witness log.
-//! 
+//!
 //! The demo is fully lab-contained: the only swarm it can talk to is the
 //! in-process `mnr-sim` mock. See AUTHORIZATION.md.
 
@@ -15,7 +15,7 @@ mod sparkle;
 
 use config::Config;
 use mnr_ledger::Ledger;
-use mnr_observer::{MeteredEngine, MockEngine, Observer, SwarmConnector};
+use mnr_observer::{FrictionConfig, MeteredEngine, MockEngine, Observer, SwarmConnector};
 use mnr_reaper::{execute_teardown, NodeState, Reaper, Secret, TripReason};
 use mnr_sim::MockSwarm;
 use std::time::Duration;
@@ -44,6 +44,7 @@ fn print_help() {
         "mnr — Mirror Node Reconnaissance (lab demo)\n\n\
          USAGE:\n  \
          mnr demo [--dir <path>]          Run the observer vs. the bundled mock swarm\n  \
+         Friction options: --inject-friction --friction-budget <1..1024> --friction-threshold <0..drift_threshold>\n  \
          mnr sparkle [--probes N] [--ttl-ms MS] [--dir <path>]   Run the multi-probe sparkle demo\n  \
          mnr ledger verify [--dir <path>] Verify a witness log's integrity\n  \
          mnr ledger show   [--dir <path>] Summarize a witness log\n\n\
@@ -72,6 +73,10 @@ fn cmd_demo(args: &[String]) -> i32 {
     };
     if let Some(dir) = arg_dir(args) {
         cfg.ledger_dir = dir;
+    }
+    if let Err(error) = apply_friction_args(&mut cfg, args).and_then(|_| cfg.validate()) {
+        eprintln!("config error: {error}");
+        return 2;
     }
 
     println!("== Mirror Node Reconnaissance — lab demo ==");
@@ -111,6 +116,18 @@ fn cmd_demo(args: &[String]) -> i32 {
     let mut steps: u64 = 0;
     {
         let mut observer = Observer::new(engine, &mut ledger, cfg.drift_threshold);
+        if cfg.inject_friction {
+            observer = match observer.with_friction(FrictionConfig {
+                budget: cfg.friction_budget,
+                threshold: cfg.friction_threshold,
+            }) {
+                Ok(observer) => observer,
+                Err(error) => {
+                    eprintln!("config error: {error}");
+                    return 2;
+                }
+            };
+        }
         loop {
             if reaper.ttl_expired() {
                 trip = TripReason::Ttl;
@@ -138,6 +155,14 @@ fn cmd_demo(args: &[String]) -> i32 {
                         trip = TripReason::CoOption { drift: rep.drift };
                         break;
                     }
+                    if reaper.ttl_expired() {
+                        trip = TripReason::Ttl;
+                        break;
+                    }
+                    if let Err(error) = observer.emit_friction(&mut swarm, &reaper) {
+                        trip = TripReason::Anomaly { detail: error };
+                        break;
+                    }
                 }
                 Err(e) if e.contains("budget") => {
                     trip = TripReason::Anomaly {
@@ -152,6 +177,13 @@ fn cmd_demo(args: &[String]) -> i32 {
             }
         }
     } // observer dropped here → releases the &mut Ledger borrow
+    swarm.disconnect();
+    println!(
+        "friction accepted={} reverifications={} virtual_ticks={}",
+        swarm.friction_stats().accepted,
+        swarm.friction_stats().reverifications,
+        swarm.friction_stats().processing_ticks
+    );
 
     println!("\n-- teardown --");
     match &trip {
@@ -202,6 +234,34 @@ fn cmd_demo(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn apply_friction_args(cfg: &mut Config, args: &[String]) -> Result<(), String> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--inject-friction" => cfg.inject_friction = true,
+            "--friction-budget" => {
+                cfg.friction_budget = args
+                    .next()
+                    .ok_or("missing --friction-budget value")?
+                    .parse()
+                    .map_err(|_| "invalid --friction-budget")?
+            }
+            "--friction-threshold" => {
+                cfg.friction_threshold = args
+                    .next()
+                    .ok_or("missing --friction-threshold value")?
+                    .parse()
+                    .map_err(|_| "invalid --friction-threshold")?
+            }
+            "--dir" => {
+                args.next().ok_or("missing --dir value")?;
+            }
+            _ => return Err(format!("unknown demo argument: {arg}")),
+        }
+    }
+    Ok(())
 }
 
 fn cmd_sparkle(args: &[String]) -> i32 {
@@ -300,5 +360,32 @@ fn cmd_ledger(args: &[String]) -> i32 {
             eprintln!("usage: mnr ledger <verify|show> [--dir <path>]");
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod friction_config_tests {
+    use super::*;
+    #[test]
+    fn cli_friction_switches_are_validated() {
+        let mut cfg = Config::default();
+        assert!(!cfg.inject_friction);
+        let args = [
+            "--inject-friction",
+            "--friction-budget",
+            "3",
+            "--friction-threshold",
+            "0.4",
+        ]
+        .map(String::from);
+        apply_friction_args(&mut cfg, &args).unwrap();
+        cfg.validate().unwrap();
+        assert!(cfg.inject_friction);
+        assert_eq!(cfg.friction_budget, 3);
+        cfg.friction_threshold = f64::NAN;
+        assert!(cfg.validate().is_err());
+        cfg.friction_threshold = 0.9;
+        assert!(cfg.validate().is_err());
+        assert!(apply_friction_args(&mut cfg, &["--friction-budget".into()]).is_err());
     }
 }

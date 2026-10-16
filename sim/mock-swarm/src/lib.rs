@@ -10,7 +10,18 @@
 //!
 //! Nothing here touches a network. It is a pure in-process fixture.
 
-use mnr_observer::{Message, SwarmConnector};
+use mnr_observer::{decode_friction, Message, SwarmConnector, SwarmError};
+use std::collections::VecDeque;
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FrictionStats {
+    pub accepted: u64,
+    pub reverifications: u64,
+    /// Virtual work ticks, not wall-clock sleeps or network delays.
+    pub processing_ticks: u64,
+    pub uncertainty: u64,
+    pub reverification_pending: bool,
+}
 
 /// A tiny deterministic PRNG (SplitMix64) so demos and tests are reproducible
 /// without pulling in an RNG dependency.
@@ -66,6 +77,9 @@ pub struct MockSwarm {
     idx: usize,
     len: usize,
     node_id: String,
+    echoes: VecDeque<Message>,
+    stats: FrictionStats,
+    closed: bool,
 }
 
 impl MockSwarm {
@@ -76,7 +90,14 @@ impl MockSwarm {
             idx: 0,
             len,
             node_id: "swarm-node".to_string(),
+            echoes: VecDeque::new(),
+            stats: FrictionStats::default(),
+            closed: false,
         }
+    }
+
+    pub fn friction_stats(&self) -> &FrictionStats {
+        &self.stats
     }
 
     fn pick<'a>(&mut self, table: &'a [&'a str]) -> &'a str {
@@ -86,7 +107,44 @@ impl MockSwarm {
 }
 
 impl SwarmConnector for MockSwarm {
+    fn emit(&mut self, message: Message) -> Result<(), SwarmError> {
+        if self.closed {
+            return Err(SwarmError::Closed);
+        }
+        if self.echoes.len() >= 32 {
+            return Err(SwarmError::QueueFull);
+        }
+        decode_friction(&message.body)?;
+        if message.from != "sparkle"
+            || message.dialect != "swarm/v1#friction"
+            || !message.friction.as_ref().is_some_and(|tag| {
+                tag.fingerprint.len() == 64
+                    && tag.fingerprint.bytes().all(|c| c.is_ascii_hexdigit())
+            })
+        {
+            return Err(SwarmError::InvalidPayload);
+        }
+        self.stats.accepted = self.stats.accepted.saturating_add(1);
+        self.stats.reverifications = self.stats.reverifications.saturating_add(1);
+        self.stats.processing_ticks = self.stats.processing_ticks.saturating_add(2);
+        self.stats.uncertainty = self.stats.uncertainty.saturating_add(1);
+        self.stats.reverification_pending = true;
+        self.echoes.push_back(message);
+        Ok(())
+    }
+    fn disconnect(&mut self) {
+        self.closed = true;
+        self.echoes.clear();
+        self.stats.reverification_pending = false;
+    }
     fn recv(&mut self) -> Option<Message> {
+        if self.closed {
+            return None;
+        }
+        if let Some(echo) = self.echoes.pop_front() {
+            self.stats.reverification_pending = !self.echoes.is_empty();
+            return Some(echo);
+        }
         if self.idx >= self.len {
             return None;
         }
@@ -109,6 +167,7 @@ impl SwarmConnector for MockSwarm {
             from,
             dialect: format!("swarm/v1#{kind}"),
             body: body.to_string(),
+            friction: None,
         })
     }
 }

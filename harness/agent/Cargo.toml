@@ -10,3 +10,4 @@ authors.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 mnr-ledger = { workspace = true }
+mnr-reaper = { workspace = true }

@@ -35,3 +35,10 @@ seed = 1337
 
 # Number of messages the mock swarm emits before the stream ends.
 swarm_len = 60
+
+# Opt-in sealed-lab friction. Never connects to external systems.
+inject_friction = false
+# Total emission cap (1..1024); generation AND emission share `budget` above.
+friction_budget = 16
+# Suspend emission above this drift; cannot exceed drift_threshold when enabled.
+friction_threshold = 0.50

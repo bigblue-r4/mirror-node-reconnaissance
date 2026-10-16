@@ -13,7 +13,7 @@ documentation in `proxy/`.
                       │   loads config, drives the run, verifies log  │
                       └───────┬───────────────┬───────────────┬──────┘
                               │               │               │
-                 reads from   ▼               ▼ witnesses      ▼ bounds
+             reads/emits lab  ▼               ▼ witnesses      ▼ bounds
         ┌──────────────────────────┐  ┌───────────────┐  ┌──────────────────┐
         │  SwarmConnector (trait)  │  │  mnr-ledger   │  │   mnr-reaper     │
         │  ── only impl: mnr-sim   │  │ hash-chained  │  │ TTL + trip →     │
@@ -118,7 +118,7 @@ split-brain harness precedence exactly. Fields: `ledger_dir`, `drift_threshold`,
 
 ## 6. Testing
 
-15 tests, all backend-free (deterministic `MockEngine` + seeded `MockSwarm`):
+Tests are backend-free (deterministic `MockEngine` + seeded `MockSwarm`):
 
 - **ledger** — append/verify round-trip, empty log, mutation detection,
   truncation detection via anchor, ISO timestamp conversion.
@@ -127,3 +127,61 @@ split-brain harness precedence exactly. Fields: `ledger_dir`, `drift_threshold`,
 - **reaper** — TTL expiry, teardown seals + wipes, secret wipe clears bytes.
 - **sim** — determinism for a seed, exact message count, escalating lure
   pressure.
+
+## 7. Friction Injection (Lab Only)
+
+`SwarmConnector::emit(Message)` is a synchronous, non-blocking emission seam;
+the only production implementation remains the in-process `MockSwarm`. Other
+receive-only connectors default to an unsupported error. No networking, TLS,
+interception or impersonation implementation is added. See
+[AUTHORIZATION.md](AUTHORIZATION.md); external injection remains concept-only
+and `proxy/` code is unchanged.
+
+The opt-in observer path performs these bounded operations:
+
+1. Check total friction cap, outstanding receipts, prior drift, per-observation
+   rate and the existing reaper TTL. No friction follows a self-attributed echo.
+2. Charge a Proposer call against the existing shared pool. Seed SplitMix64 from
+   the ledger's 32-byte epoch nonce and generate a short lease/reference request.
+   The same ledger state yields the same payload; the mock swarm RNG is separate.
+3. Dry-run `decode_friction`, the same strict, bounded JSON schema parser used
+   by MockSwarm ingestion. Syntactic errors/unknown fields never reach emit.
+   The allowed incompleteness is semantic: absent lease token, circular reference
+   or unresolved ID. Rejected proposals are fingerprint-witnessed and stop the run.
+4. Witness the valid proposal as a `friction_point` attempt, check TTL again,
+   charge emission from the shared pool, then perform the non-blocking emit.
+   Any witness error stops before ingestion. No raw payload is written to disk.
+5. Store a bounded, single-use local receipt with an epoch tag and salted hash
+   of the full message envelope. The returned metadata is untrusted until that
+   receipt matches exactly. Altered bodies, forged tags and replayed receipts
+   take the normal Verifier path. Matched self-perturbations hold existing drift
+   steady in both the mock scorer and observer; they cannot erase genuine drift.
+
+The queue and local receipt window each hold at most 32 messages. Mock ingestion
+increments uncertainty and re-verification counters, adds two virtual work ticks,
+and marks re-verification pending until its echo is consumed. It does not block,
+sleep or change the seeded organic traffic sequence. The CLI checks TTL between
+steps and before emission; teardown disconnects the mock queue before sealing
+and wiping. The synchronous mock model is bounded work; there is no unbounded
+external model call or remote connector in this implementation.
+
+Witness entry shape and hash-chain verification are unchanged. For a friction
+entry, the epoch nonce is `SHA-256("mnr/friction-epoch/v1" || previous_hash_ascii
+|| sequence_u64_little_endian)`; the stored payload fingerprint is exactly
+`SHA-256(payload_bytes || nonce)`. The public, reconstructible nonce separates
+epochs and keeps generation reproducible; it is not a secret salt or encryption.
+Sealing/verification also accepts a genuinely empty ledger, which is necessary
+when TTL expires before the first observation. Mutation, truncation and extension
+remain detectable relative to the retained head anchor.
+
+Configuration adds `inject_friction`, `friction_budget` and `friction_threshold`
+to file/env/default resolution, with explicit CLI overrides. Injection defaults
+off; budgets are capped at 1024 and the enabled friction threshold cannot exceed
+the drift threshold. Malformed config and invalid friction environment values
+are errors rather than silently enabling default emission limits.
+
+Integration tests exercise shared-budget exhaustion, disabled/risk/TTL gating,
+full queue rejection, exact self-attribution versus spoof/replay, organic traffic
+preservation, re-verification work, deterministic initial epochs, fail-closed
+witness writes, genuine-drift teardown, salted fingerprints/no plaintext, ledger
+tampering and both normal/zero-TTL CLI sealing paths.
