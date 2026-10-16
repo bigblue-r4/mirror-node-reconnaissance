@@ -3,6 +3,7 @@
 //! Subcommands:
 //!   demo            Run the observer against the bundled mock swarm, then seal
 //!                   and verify the witness log.
+//!   sparkle         Run the sealed-lab multi-probe sparkle demo.
 //!   ledger verify   Verify the integrity of a witness log on disk.
 //!   ledger show     Print a short summary of a witness log.
 //!
@@ -10,6 +11,7 @@
 //! in-process `mnr-sim` mock. See AUTHORIZATION.md.
 
 mod config;
+mod sparkle;
 
 use config::Config;
 use mnr_ledger::Ledger;
@@ -22,6 +24,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("demo") => cmd_demo(&args[1..]),
+        Some("sparkle") => cmd_sparkle(&args[1..]),
         Some("ledger") => cmd_ledger(&args[1..]),
         Some("help") | Some("-h") | Some("--help") | None => {
             print_help();
@@ -42,6 +45,7 @@ fn print_help() {
          USAGE:\n  \
          mnr demo [--dir <path>]          Run the observer vs. the bundled mock swarm\n  \
          Friction options: --inject-friction --friction-budget <1..1024> --friction-threshold <0..drift_threshold>\n  \
+         mnr sparkle [--probes N] [--ttl-ms MS] [--dir <path>]   Run the multi-probe sparkle demo\n  \
          mnr ledger verify [--dir <path>] Verify a witness log's integrity\n  \
          mnr ledger show   [--dir <path>] Summarize a witness log\n\n\
          Config: env MNR_* > configs/mnr.toml > defaults (see configs/mnr.toml.example)."
@@ -258,6 +262,61 @@ fn apply_friction_args(cfg: &mut Config, args: &[String]) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+fn cmd_sparkle(args: &[String]) -> i32 {
+    let cfg = match sparkle::SparkleConfig::from_args(args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("sparkle config error: {e}");
+            return 1;
+        }
+    };
+
+    println!("== Mirror Node Reconnaissance — sparkle demo ==");
+    println!(
+        "probes={} ttl_ms={} drift_threshold={:.2} budget_per_probe={} swarm_len={} base_seed={} dir={}\n",
+        cfg.num_probes,
+        cfg.ttl_ms,
+        cfg.drift_threshold,
+        cfg.budget_per_probe,
+        cfg.swarm_len_per_probe,
+        cfg.base_seed,
+        cfg.dir
+    );
+
+    let mut controller = sparkle::SparkleController::new(cfg.clone());
+    match controller.run_all_probes() {
+        Ok(agg) => {
+            println!(
+                "\n-- sparkle aggregation --\n{}
+               probes sealed, root={}…",
+                agg.num_probes,
+                &agg.aggregation_root[..16.min(agg.aggregation_root.len())]
+            );
+
+            match sparkle::verify_sparkle_aggregation(&cfg.dir) {
+                Ok(report) => {
+                    println!(
+                        "OK: probes_verified={} all_probes_ok={} aggregate_ok={} root={}…",
+                        report.probes_verified,
+                        report.all_probes_ok,
+                        report.aggregate_ok,
+                        &report.aggregation_root[..16.min(report.aggregation_root.len())]
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("SPARKLE VERIFY FAILED: {e}");
+                    1
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("sparkle run failed: {e}");
+            1
+        }
+    }
 }
 
 fn cmd_ledger(args: &[String]) -> i32 {
