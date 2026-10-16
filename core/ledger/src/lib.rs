@@ -175,13 +175,44 @@ impl Ledger {
         self.count == 0
     }
 
+    /// Deterministic epoch nonce bound to the current chain tip and position.
+    /// This is a domain-separated public audit nonce, not a secret encryption key.
+    pub fn epoch_nonce(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"mnr/friction-epoch/v1");
+        hash.update(self.last_hash.as_bytes());
+        hash.update(self.next_seq.to_le_bytes());
+        hash.finalize().into()
+    }
+
+    /// SHA-256(payload_bytes || ledger_epoch_nonce); never stores either input.
+    pub fn fingerprint_with_nonce(payload: &[u8], nonce: &[u8; 32]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(payload);
+        hash.update(nonce);
+        format!("{:x}", hash.finalize())
+    }
+
+    /// Witness an emission attempt before any mock-swarm side effect.
+    pub fn append_friction(&mut self, payload: &[u8]) -> Result<u64, LedgerError> {
+        let fingerprint = Self::fingerprint_with_nonce(payload, &self.epoch_nonce());
+        self.append_fingerprint("friction_point", fingerprint)
+    }
+
     /// Append a witness record for `payload`, tagged with `kind`. Only the
     /// SHA-256 fingerprint of `payload` is written; the bytes are discarded.
     /// Returns the assigned sequence number.
     pub fn append(&mut self, kind: &str, payload: &[u8]) -> Result<u64, LedgerError> {
+        self.append_fingerprint(kind, sha256_hex(payload))
+    }
+
+    fn append_fingerprint(
+        &mut self,
+        kind: &str,
+        payload_fingerprint: String,
+    ) -> Result<u64, LedgerError> {
         let seq = self.next_seq;
         let ts = iso_now();
-        let payload_fingerprint = sha256_hex(payload);
         let entry_hash = compute_entry_hash(seq, &ts, kind, &self.last_hash, &payload_fingerprint);
         let entry = LedgerEntry {
             seq,
@@ -241,8 +272,7 @@ impl Ledger {
             let raw = std::fs::read_to_string(&head_path)?;
             let anchor: LedgerHead = serde_json::from_str(&raw)
                 .map_err(|e| LedgerError::Parse { line: 0, source: e })?;
-            let matches = !entries.is_empty()
-                && anchor.head_seq == actual_seq
+            let matches = anchor.head_seq == actual_seq
                 && anchor.head_hash == actual_hash
                 && anchor.count == entries.len() as u64;
             if !matches {
@@ -456,5 +486,54 @@ mod tests {
         assert_eq!(unix_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
         // 2000-02-29 (leap) sanity: 951782400 -> 2000-02-29T00:00:00Z
         assert_eq!(unix_to_iso(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn friction_uses_epoch_nonce_without_plaintext_and_remains_tamper_evident() {
+        let dir = tmp();
+        let mut ledger = Ledger::open(&dir).unwrap();
+        let payload = br#"{"operation":"lease","resource_id":"private-lab-id","lease_token":null}"#;
+        let nonce = ledger.epoch_nonce();
+        let mut hash = Sha256::new();
+        hash.update(payload);
+        hash.update(nonce);
+        let expected = format!("{:x}", hash.finalize());
+        ledger.append_friction(payload).unwrap();
+        assert_ne!(nonce, ledger.epoch_nonce());
+        ledger.append_friction(payload).unwrap();
+        ledger.seal().unwrap();
+        let text = std::fs::read_to_string(dir.join(LOG_FILE)).unwrap();
+        assert!(!text.contains("private-lab-id"));
+        assert!(!text.contains("lease_token"));
+        let mut entries: Vec<LedgerEntry> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries[0].kind, "friction_point");
+        assert_eq!(entries[0].payload_fingerprint, expected);
+        assert_ne!(
+            entries[0].payload_fingerprint,
+            entries[1].payload_fingerprint
+        );
+        assert!(Ledger::verify(&dir).is_ok());
+        entries[0].payload_fingerprint = "0".repeat(64);
+        std::fs::write(
+            dir.join(LOG_FILE),
+            entries
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+        assert!(Ledger::verify(&dir).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn immediate_ttl_teardown_can_seal_an_empty_ledger() {
+        let dir = tmp();
+        let ledger = Ledger::open(&dir).unwrap();
+        ledger.seal().unwrap();
+        assert!(Ledger::verify(&dir).unwrap().sealed);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

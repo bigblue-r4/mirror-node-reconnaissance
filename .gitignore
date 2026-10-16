@@ -3,5 +3,4 @@
 # runtime witness logs
 /mnr-run
 **/*.rs.bk
-# local, non-example config
-/configs/mnr.toml
+# configs/mnr.toml ships safe lab defaults; use MNR_CONFIG for local overrides.

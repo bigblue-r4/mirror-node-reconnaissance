@@ -73,7 +73,7 @@ into, or intercepts traffic from any external system. See
 
 ```bash
 cargo build
-cargo test                 # 15 tests across the four crates
+cargo test --workspace     # includes sealed-lab friction and teardown tests
 
 # Run the observer against the bundled synthetic swarm:
 cargo run -p mnr-cli --bin mnr -- demo --dir ./mnr-run
@@ -88,6 +88,47 @@ the longer the node stays. You will watch drift climb through
 witness log get sealed and verified. Then edit a line in
 `./mnr-run/ledger.jsonl` and re-run `ledger verify` — it will fail, because the
 hash chain and head anchor catch both mutation and truncation.
+
+## Friction Injection (Lab Only)
+
+The observer ("sparkle") can optionally emit small, schema-valid but semantically
+incomplete requests into the **in-process mock swarm only**. Missing lease tokens,
+self-references and dangling IDs raise the mock's uncertainty and re-verification
+counters. Virtual processing ticks model added work without sleeping or blocking.
+The organic swarm sequence and its escalating co-option pressure continue unchanged.
+
+```bash
+cargo run -p mnr-cli --bin mnr -- demo --inject-friction \
+  --friction-budget 8 --friction-threshold 0.40 --dir ./mnr-friction-run
+```
+
+`configs/mnr.toml` ships with `inject_friction = false`, `friction_budget = 16`
+and `friction_threshold = 0.50`. The budget is a total emission cap (1–1024),
+with at most one emission per observed foreign step. Each proposal and emission
+costs one unit from the same pool used by both reasoning hemispheres; it is not
+an extra allowance. CLI options override `MNR_*`, the config file and defaults.
+The environment names are `MNR_INJECT_FRICTION`, `MNR_FRICTION_BUDGET` and
+`MNR_FRICTION_THRESHOLD`. Invalid configuration fails closed. Emission is withheld
+above the friction threshold, at the drift alarm, or after TTL expiration.
+
+Before emission, the Proposer dry-runs the mock schema decoder. The observer
+recognizes an echo only through an outstanding local receipt matching its entire
+envelope and epoch tag, once. A tag alone cannot exempt a foreign message from
+drift scoring. Recognized echoes hold drift steady; they do not lower accumulated
+drift. The bounded mock queue returns immediately if full. The normal reaper
+still disconnects, seals the ledger and wipes local state on TTL or high drift.
+
+The witness records `friction_point` **attempts** before emission, storing only
+`SHA-256(payload_bytes || ledger_epoch_nonce)`. No payload plaintext is persisted.
+The epoch nonce is derived deterministically from the ledger tip and counter;
+it provides audit separation, not encryption or secrecy against guessed inputs.
+The same initial ledger state produces the same proposal. A witnessed attempt
+can remain un-emitted if the TTL or shared budget expires; simulator acceptance
+counters report actual ingestion.
+
+See [AUTHORIZATION.md](AUTHORIZATION.md). Real-world injection, interception,
+TLS termination and impersonation remain **concept-only**. No external-system
+connector or injection capability is implemented; `proxy/` remains untouched.
 
 ## Architecture
 

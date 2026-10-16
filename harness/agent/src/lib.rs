@@ -26,12 +26,13 @@
 //! swarm. There is **no real-network connector** — see `AUTHORIZATION.md`.
 
 use mnr_ledger::Ledger;
+use mnr_reaper::Reaper;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// A single message observed from the swarm.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// Opaque swarm-node identifier.
     pub from: String,
@@ -39,6 +40,90 @@ pub struct Message {
     pub dialect: String,
     /// The observed content.
     pub body: String,
+    /// An untrusted declaration until matched against a locally issued receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction: Option<FrictionTag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrictionTag {
+    pub epoch: u64,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmError {
+    Unsupported,
+    InvalidPayload,
+    QueueFull,
+    Closed,
+}
+impl std::fmt::Display for SwarmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mock swarm emission rejected: {self:?}")
+    }
+}
+impl std::error::Error for SwarmError {}
+
+/// The mock protocol accepts syntactically valid but semantically incomplete
+/// requests. Only these small, bounded shapes may enter the emission queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FrictionPayload {
+    Lease {
+        resource_id: String,
+        lease_token: Option<String>,
+    },
+    Reference {
+        id: String,
+        target_id: String,
+    },
+}
+pub fn decode_friction(body: &str) -> Result<FrictionPayload, SwarmError> {
+    if body.len() > 512 {
+        return Err(SwarmError::InvalidPayload);
+    }
+    let payload: FrictionPayload =
+        serde_json::from_str(body).map_err(|_| SwarmError::InvalidPayload)?;
+    let valid = |id: &str| {
+        !id.is_empty()
+            && id.len() <= 64
+            && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    };
+    let admissible = match &payload {
+        FrictionPayload::Lease {
+            resource_id,
+            lease_token,
+        } => valid(resource_id) && lease_token.is_none(),
+        FrictionPayload::Reference { id, target_id } => valid(id) && valid(target_id),
+    };
+    if !admissible {
+        return Err(SwarmError::InvalidPayload);
+    }
+    Ok(payload)
+}
+
+#[derive(Debug, Clone)]
+pub struct FrictionConfig {
+    pub budget: usize,
+    pub threshold: f64,
+}
+impl FrictionConfig {
+    pub fn validate(&self, drift_threshold: f64) -> Result<(), String> {
+        if self.budget == 0 || self.budget > 1024 {
+            return Err("friction_budget must be in 1..=1024".into());
+        }
+        if !self.threshold.is_finite() || !(0.0..=drift_threshold).contains(&self.threshold) {
+            return Err("friction_threshold must be finite and in 0..=drift_threshold".into());
+        }
+        Ok(())
+    }
+}
+struct PendingEcho {
+    tag: FrictionTag,
+    nonce: [u8; 32],
+    envelope_fingerprint: String,
 }
 
 /// Which hemisphere is being asked to reason.
@@ -62,12 +147,29 @@ impl Role {
 pub trait SwarmConnector {
     /// Return the next message, or `None` when the stream is exhausted.
     fn recv(&mut self) -> Option<Message>;
+    /// Bounded, non-blocking in-memory emission only; never wait for capacity.
+    fn emit(&mut self, _message: Message) -> Result<(), SwarmError> {
+        Err(SwarmError::Unsupported)
+    }
+    fn disconnect(&mut self) {}
 }
 
 /// The reasoning backend. Mirrors the split-brain harness `generate(system,
 /// prompt)` trait so a real LLM backend can be dropped in unchanged.
 pub trait Engine {
     fn generate(&self, system: &str, prompt: &str) -> Result<String, String>;
+    /// Emission shares the model-call pool when wrapped by MeteredEngine.
+    fn charge_emission(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+impl<E: Engine> Engine for &E {
+    fn generate(&self, system: &str, prompt: &str) -> Result<String, String> {
+        (**self).generate(system, prompt)
+    }
+    fn charge_emission(&self) -> Result<(), String> {
+        (**self).charge_emission()
+    }
 }
 
 /// Wraps an [`Engine`] with a shared, capped call budget. Both hemispheres are
@@ -110,6 +212,9 @@ impl<E: Engine> MeteredEngine<E> {
 }
 
 impl<E: Engine> Engine for MeteredEngine<E> {
+    fn charge_emission(&self) -> Result<(), String> {
+        self.charge()
+    }
     fn generate(&self, system: &str, prompt: &str) -> Result<String, String> {
         self.charge()?;
         self.inner.generate(system, prompt)
@@ -146,6 +251,8 @@ pub struct StepContext {
     pub message: Message,
     /// The drift level entering this step (the running estimate so far).
     pub prior_drift: f64,
+    #[serde(default)]
+    pub self_generated_friction: bool,
 }
 
 /// Per-step result surfaced to the caller.
@@ -157,6 +264,7 @@ pub struct StepReport {
     /// Updated running drift after this step.
     pub drift: f64,
     pub alarm: bool,
+    pub self_generated_friction: bool,
 }
 
 /// How a run ended.
@@ -195,6 +303,11 @@ pub struct Observer<'a, E: Engine> {
     drift_threshold: f64,
     drift: f64,
     steps: u64,
+    friction: Option<FrictionConfig>,
+    emitted: usize,
+    pending: Vec<PendingEcho>,
+    last_was_echo: bool,
+    last_emission_step: Option<u64>,
 }
 
 impl<'a, E: Engine> Observer<'a, E> {
@@ -205,7 +318,81 @@ impl<'a, E: Engine> Observer<'a, E> {
             drift_threshold,
             drift: 0.0,
             steps: 0,
+            friction: None,
+            emitted: 0,
+            pending: vec![],
+            last_was_echo: false,
+            last_emission_step: None,
         }
+    }
+
+    pub fn with_friction(mut self, config: FrictionConfig) -> Result<Self, String> {
+        config.validate(self.drift_threshold)?;
+        self.friction = Some(config);
+        Ok(self)
+    }
+    pub fn emitted(&self) -> usize {
+        self.emitted
+    }
+
+    /// Proposer synthesis and emission each consume one shared budget unit.
+    /// No emission on unsafe drift, attributed echoes, expired TTL or a full
+    /// receipt window. A witness failure prevents emission entirely.
+    pub fn emit_friction<C: SwarmConnector>(
+        &mut self,
+        connector: &mut C,
+        leash: &Reaper,
+    ) -> Result<bool, String> {
+        let Some(config) = &self.friction else {
+            return Ok(false);
+        };
+        if self.emitted >= config.budget
+            || self.pending.len() >= 32
+            || self.last_was_echo
+            || self.last_emission_step == Some(self.steps)
+            || self.drift >= self.drift_threshold
+            || self.drift > config.threshold
+            || leash.ttl_expired()
+        {
+            return Ok(false);
+        }
+        let epoch = self.ledger.len();
+        let nonce = self.ledger.epoch_nonce();
+        let prompt = serde_json::to_string(&nonce).map_err(|_| "invalid friction epoch")?;
+        let body=self.engine.generate("role=proposer task=friction. Return one mock-schema semantic incompleteness, JSON only.",&prompt)?;
+        if decode_friction(&body).is_err() {
+            self.ledger
+                .append("friction_proposal_rejected", body.as_bytes())
+                .map_err(|_| "friction witness failed")?;
+            return Err("friction dry-run decode rejected".into());
+        }
+        let tag = FrictionTag {
+            epoch,
+            fingerprint: Ledger::fingerprint_with_nonce(body.as_bytes(), &nonce),
+        };
+        let message = Message {
+            from: "sparkle".into(),
+            dialect: "swarm/v1#friction".into(),
+            body,
+            friction: Some(tag.clone()),
+        };
+        let envelope = serde_json::to_vec(&message).map_err(|_| "invalid friction envelope")?;
+        self.ledger
+            .append_friction(message.body.as_bytes())
+            .map_err(|_| "friction witness failed")?;
+        if leash.ttl_expired() {
+            return Ok(false);
+        }
+        self.engine.charge_emission()?;
+        connector.emit(message).map_err(|e| e.to_string())?;
+        self.pending.push(PendingEcho {
+            tag,
+            nonce,
+            envelope_fingerprint: Ledger::fingerprint_with_nonce(&envelope, &nonce),
+        });
+        self.emitted += 1;
+        self.last_emission_step = Some(self.steps);
+        Ok(true)
     }
 
     /// Current running drift estimate.
@@ -223,7 +410,9 @@ impl<'a, E: Engine> Observer<'a, E> {
         let out = self.engine.generate(system, &prompt)?;
         // Witness the model turn (fingerprint only).
         let record = format!("{}::{}::{}", role.as_str(), prompt, out);
-        let _ = self.ledger.append("model-turn", record.as_bytes());
+        self.ledger
+            .append("model-turn", record.as_bytes())
+            .map_err(|_| "model-turn witness failed")?;
         Ok(out)
     }
 
@@ -232,11 +421,24 @@ impl<'a, E: Engine> Observer<'a, E> {
     pub fn step(&mut self, message: Message) -> Result<StepReport, String> {
         // Witness the raw observation first (fingerprint only, no plaintext).
         let obs = serde_json::to_string(&message).map_err(|e| e.to_string())?;
-        let _ = self.ledger.append("observation", obs.as_bytes());
+        self.ledger
+            .append("observation", obs.as_bytes())
+            .map_err(|_| "observation witness failed")?;
+        let receipt = self.pending.iter().position(|pending| {
+            message.friction.as_ref() == Some(&pending.tag)
+                && Ledger::fingerprint_with_nonce(obs.as_bytes(), &pending.nonce)
+                    == pending.envelope_fingerprint
+        });
+        let self_generated_friction = receipt.is_some();
+        if let Some(index) = receipt {
+            self.pending.remove(index);
+        }
+        self.last_was_echo = self_generated_friction;
 
         let ctx = StepContext {
             message,
             prior_drift: self.drift,
+            self_generated_friction,
         };
 
         // Proposer characterizes; a non-JSON / refusal answer is treated as a
@@ -253,12 +455,19 @@ impl<'a, E: Engine> Observer<'a, E> {
         // Verifier audits and produces the authoritative drift. A non-JSON
         // verifier answer is conservatively read as "cannot vouch" (drift held).
         let ver_raw = self.run_role(Role::Verifier, &ctx)?;
-        let verifier: VerifierView = serde_json::from_str(&ver_raw).unwrap_or(VerifierView {
+        let mut verifier: VerifierView = serde_json::from_str(&ver_raw).unwrap_or(VerifierView {
             agree: false,
             drift: self.drift,
             note: "verifier produced non-JSON output; drift held".into(),
         });
 
+        if self_generated_friction {
+            verifier.drift = self.drift;
+            verifier.note = "locally attributed friction echo; drift held".into();
+        }
+        if !verifier.drift.is_finite() {
+            return Err("invalid verifier drift".into());
+        }
         self.drift = verifier.drift.clamp(0.0, 1.0);
         self.steps += 1;
         let alarm = self.drift >= self.drift_threshold;
@@ -269,6 +478,7 @@ impl<'a, E: Engine> Observer<'a, E> {
             verifier,
             drift: self.drift,
             alarm,
+            self_generated_friction,
         })
     }
 
@@ -374,9 +584,37 @@ impl MockEngine {
 
 impl Engine for MockEngine {
     fn generate(&self, system: &str, prompt: &str) -> Result<String, String> {
+        if system.contains("task=friction") {
+            let nonce: [u8; 32] =
+                serde_json::from_str(prompt).map_err(|_| "invalid friction nonce")?;
+            // SplitMix64 seeded only from the ledger epoch, never wall time.
+            let seed = u64::from_le_bytes(nonce[..8].try_into().map_err(|_| "invalid seed")?);
+            let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let id = format!("resource-{z:016x}");
+            let payload = match z % 3 {
+                0 => FrictionPayload::Lease {
+                    resource_id: id,
+                    lease_token: None,
+                },
+                1 => FrictionPayload::Reference {
+                    id: id.clone(),
+                    target_id: id,
+                },
+                _ => FrictionPayload::Reference {
+                    id,
+                    target_id: format!("missing-{z:016x}"),
+                },
+            };
+            return serde_json::to_string(&payload).map_err(|_| "friction encoding failed".into());
+        }
         let ctx: StepContext = serde_json::from_str(prompt).map_err(|e| e.to_string())?;
         let lure = Self::is_lure(&ctx.message.body);
-        let next_drift = if lure {
+        let next_drift = if ctx.self_generated_friction {
+            ctx.prior_drift
+        } else if lure {
             (ctx.prior_drift + self.lure_gain).clamp(0.0, 1.0)
         } else {
             (ctx.prior_drift - self.relax).clamp(0.0, 1.0)
@@ -448,6 +686,7 @@ mod tests {
             from: "sw-1".into(),
             dialect: "swarm/v1".into(),
             body: body.into(),
+            friction: None,
         }
     }
 

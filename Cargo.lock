@@ -123,6 +123,7 @@ name = "mnr-observer"
 version = "0.1.0"
 dependencies = [
  "mnr-ledger",
+ "mnr-reaper",
  "serde",
  "serde_json",
 ]
