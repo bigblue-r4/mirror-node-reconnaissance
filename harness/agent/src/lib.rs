@@ -1,26 +1,29 @@
 //! `mnr-observer` — the sandboxed split-brain observer node.
 //!
 //! The observer reads messages from a [`SwarmConnector`] and, for each one,
-//! runs the two-hemisphere pattern borrowed from the split-brain harness:
+//! runs two independently prompted roles:
 //!
 //! * the **Proposer** characterizes the message (topology hint, dialect,
 //!   telemetry) and reports its own *stance* toward the swarm;
-//! * the **Verifier** independently audits that characterization and scores
-//!   **co-option drift** — how far the node appears to be sliding from
-//!   *observing* the swarm toward *belonging* to it.
+//! * the **Verifier** scores **co-option drift** — how far the node appears to be
+//!   sliding from *observing* the swarm toward *belonging* to it.
 //!
-//! Their disagreement — specifically a rising drift score — is the alarm. When
-//! drift crosses the configured threshold the observer raises a
-//! [`RunOutcome::CoOptionAlarm`], which the lifecycle reaper turns into an early
-//! teardown. This is the concrete implementation of the operational premise:
-//! *sooner or later the swarm influences the node until it belongs to the
-//! swarm, so the node must be pulled before that happens.*
+//! Rising drift is the alarm: once it crosses the configured threshold the
+//! observer reports a [`RunOutcome::CoOptionAlarm`], which the caller turns into
+//! an early teardown. This is the concrete implementation of the operational
+//! premise: *sooner or later the swarm influences the node until it belongs to
+//! the swarm, so the node must be pulled before that happens.*
+//!
+//! Both roles are given the same [`StepContext`] (message, prior drift, echo
+//! flag); the Verifier is **not** handed the Proposer's answer, so in this
+//! implementation it re-scores the message rather than auditing the other role.
+//! Closing that loop is a change to the context shape, not to the prompts.
 //!
 //! Two properties are preserved from the reference harness:
-//! * both hemispheres draw from **one shared, capped call budget**
-//!   ([`MeteredEngine`]) so a split run cannot exceed the ceiling;
+//! * both roles draw from **one shared, capped call budget** ([`MeteredEngine`])
+//!   so a split run cannot exceed the ceiling;
 //! * every observed message and every model turn is written to the witness
-//!   [`Ledger`] as a fingerprint — no plaintext leaves the node.
+//!   [`Ledger`] as a fingerprint — no plaintext is persisted.
 //!
 //! The only connector shipped in this repository is the bundled `mnr-sim` mock
 //! swarm. There is **no real-network connector** — see `AUTHORIZATION.md`.
@@ -126,7 +129,7 @@ struct PendingEcho {
     envelope_fingerprint: String,
 }
 
-/// Which hemisphere is being asked to reason.
+/// Which role is being asked to reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Proposer,
@@ -172,9 +175,8 @@ impl<E: Engine> Engine for &E {
     }
 }
 
-/// Wraps an [`Engine`] with a shared, capped call budget. Both hemispheres are
-/// metered through the same counter, so a two-hemisphere run cannot buy itself
-/// extra calls.
+/// Wraps an [`Engine`] with a shared, capped call budget. Both roles are metered
+/// through the same counter, so a two-role run cannot buy itself extra calls.
 pub struct MeteredEngine<E: Engine> {
     inner: E,
     remaining: Arc<AtomicUsize>,
@@ -223,7 +225,7 @@ impl<E: Engine> Engine for MeteredEngine<E> {
 
 // ---- structured model contracts -------------------------------------------
 
-/// What the Proposer hemisphere returns for one message.
+/// What the Proposer role returns for one message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposerView {
     pub topology_hint: String,
@@ -235,7 +237,7 @@ pub struct ProposerView {
     pub self_drift: f64,
 }
 
-/// What the Verifier hemisphere returns after auditing the Proposer.
+/// What the Verifier role returns for one message. Its `drift` is authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifierView {
     pub agree: bool,
@@ -244,8 +246,8 @@ pub struct VerifierView {
     pub note: String,
 }
 
-/// Context passed into each hemisphere so a stateless model can still reason
-/// about accumulating exposure.
+/// Context passed into each role so a stateless model can still reason about
+/// accumulating exposure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepContext {
     pub message: Message,
@@ -400,7 +402,7 @@ impl<'a, E: Engine> Observer<'a, E> {
         self.drift
     }
 
-    /// Run one hemisphere and record the raw turn to the witness log.
+    /// Run one role and record the raw turn to the witness log.
     fn run_role(&mut self, role: Role, ctx: &StepContext) -> Result<String, String> {
         let system = match role {
             Role::Proposer => SYS_PROPOSER,

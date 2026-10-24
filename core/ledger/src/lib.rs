@@ -1,21 +1,41 @@
-//! `mnr-ledger` — the out-of-band, tamper-evident witness log.
+//! `mnr-ledger` — the tamper-evident witness log.
 //!
 //! Every event an observer node sees, and every reasoning turn it takes, is
-//! hashed (SHA-256) and chained to the previous entry. The chain plus a signed
+//! hashed (SHA-256) and chained to the previous entry. The chain plus a sealed
 //! head anchor (`log-head.json`) make two kinds of tampering detectable after
 //! the fact:
 //!
 //! * **mutation** — editing any past entry breaks its `entry_hash` and every
 //!   `prev_hash` that follows it;
-//! * **truncation / extension** — dropping or appending trailing entries makes
-//!   the recomputed head disagree with the sealed anchor.
+//! * **truncation** — dropping trailing entries makes the recomputed tail
+//!   disagree with the sealed anchor.
+//!
+//! The anchor is written exactly once (`create_new`) and never rewritten, and a
+//! sealed log cannot be reopened for appending. Truncating a log and then
+//! re-running the node in the same directory therefore fails loudly instead of
+//! silently re-anchoring the shortened chain.
+//!
+//! # Trust boundary
+//!
+//! There is no key, MAC or signature here — only SHA-256. The guarantee is
+//! therefore **conditional on custody of the ledger directory**: a party who can
+//! write both `ledger.jsonl` and `log-head.json` can delete the pair, rebuild a
+//! consistent chain, seal it, and [`Ledger::verify`] will pass. A deleted anchor
+//! is also indistinguishable from a log that was never sealed. To make a run
+//! count as evidence against the node itself, the head hash has to be copied out
+//! of the node's directory into separate custody at seal time; this crate does
+//! not do that. This is **detection, not prevention**, and it is not a trusted
+//! timestamp.
+//!
+//! # Privacy
 //!
 //! The log stores **fingerprints, never plaintext** (privacy-by-fingerprint):
 //! callers hand raw bytes to [`Ledger::append`], and only the SHA-256 of those
 //! bytes is persisted. This mirrors the append-only JSONL + fingerprint
-//! convention used by the split-brain harness `sbh-store` crate.
-//!
-//! This is **detection, not prevention** — the same posture as SLATE.
+//! convention used by the split-brain harness `sbh-store` crate. It limits bulk
+//! disclosure, not a determined reader: where the input domain is small (the
+//! lab's mock vocabulary, for instance) a fingerprint can be inverted by
+//! guessing.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -88,6 +108,16 @@ pub enum LedgerError {
         actual_seq: u64,
         actual_hash: String,
     },
+    /// A `log-head.json` anchor already exists and describes a different head.
+    /// Seals are create-once: an anchor is never silently replaced.
+    AlreadySealed {
+        head: LedgerHead,
+    },
+    /// A `kind` tag was empty, longer than 64 bytes, or contained characters
+    /// outside `[A-Za-z0-9._-]`.
+    InvalidKind {
+        kind: String,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -110,6 +140,15 @@ impl fmt::Display for LedgerError {
                 f,
                 "head anchor mismatch: sealed head_seq={} head_hash={}, but chain ends at seq={} hash={} (truncation or extension)",
                 anchor.head_seq, anchor.head_hash, actual_seq, actual_hash
+            ),
+            LedgerError::AlreadySealed { head } => write!(
+                f,
+                "ledger is already sealed at {} entries (head_seq={}, head_hash={}); a sealed witness log is final — use a fresh directory",
+                head.count, head.head_seq, head.head_hash
+            ),
+            LedgerError::InvalidKind { kind } => write!(
+                f,
+                "invalid ledger kind {kind:?}: expected 1..=64 bytes of [A-Za-z0-9._-]"
             ),
         }
     }
@@ -143,12 +182,21 @@ pub struct Ledger {
 impl Ledger {
     /// Open (or create) a ledger in `dir`. If a log already exists it is
     /// verified before any further appends are allowed, so a broken log can
-    /// never be silently extended.
+    /// never be silently extended. If a head anchor exists it must match the
+    /// chain, and then opening fails with [`LedgerError::AlreadySealed`]: a
+    /// sealed witness log is final, which is what stops a truncated log from
+    /// being re-anchored.
     pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self, LedgerError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let entries = read_all(&dir.join(LOG_FILE))?;
         check_chain(&entries)?;
+        let head_path = dir.join(HEAD_FILE);
+        if head_path.exists() {
+            let anchor = read_head(&head_path)?;
+            check_anchor(&anchor, &entries)?;
+            return Err(LedgerError::AlreadySealed { head: anchor });
+        }
         let (last_hash, next_seq) = match entries.last() {
             Some(e) => (e.entry_hash.clone(), e.seq + 1),
             None => (GENESIS_PREV.to_string(), 0),
@@ -211,6 +259,7 @@ impl Ledger {
         kind: &str,
         payload_fingerprint: String,
     ) -> Result<u64, LedgerError> {
+        check_kind(kind)?;
         let seq = self.next_seq;
         let ts = iso_now();
         let entry_hash = compute_entry_hash(seq, &ts, kind, &self.last_hash, &payload_fingerprint);
@@ -232,6 +281,9 @@ impl Ledger {
             .open(self.dir.join(LOG_FILE))?;
         writeln!(f, "{line}")?;
         f.flush()?;
+        // Sync every entry, so a durable anchor can never describe an entry
+        // that was lost in a crash.
+        f.sync_data()?;
         self.last_hash = entry_hash;
         self.next_seq += 1;
         self.count += 1;
@@ -239,7 +291,10 @@ impl Ledger {
     }
 
     /// Seal the log: write the head anchor (`log-head.json`) capturing the
-    /// current tail. After a seal, truncation or extension is detectable.
+    /// current tail. The anchor is created once and never rewritten, so sealing
+    /// a head that differs from the existing anchor fails with
+    /// [`LedgerError::AlreadySealed`] rather than silently re-anchoring the
+    /// chain. Re-sealing the same head is idempotent.
     pub fn seal(&self) -> Result<LedgerHead, LedgerError> {
         let head = LedgerHead {
             head_seq: self.next_seq.saturating_sub(1),
@@ -247,41 +302,57 @@ impl Ledger {
             count: self.count,
             sealed_at: iso_now(),
         };
-        let json = serde_json::to_string_pretty(&head)
+        let path = self.dir.join(HEAD_FILE);
+        let mut f = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                let existing = read_head(&path)?;
+                let same = existing.head_seq == head.head_seq
+                    && existing.head_hash == head.head_hash
+                    && existing.count == head.count;
+                if same {
+                    return Ok(existing);
+                }
+                return Err(LedgerError::AlreadySealed { head: existing });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let json = serde_json::to_vec_pretty(&head)
             .map_err(|e| LedgerError::Parse { line: 0, source: e })?;
-        let mut f = File::create(self.dir.join(HEAD_FILE))?;
-        f.write_all(json.as_bytes())?;
+        f.write_all(&json)?;
         f.flush()?;
+        f.sync_all()?;
         Ok(head)
     }
 
+    /// Read every entry of an on-disk ledger without opening it for writing.
+    ///
+    /// The chain is verified first, so a returned vector is internally
+    /// consistent; the anchor is not checked here — use [`Ledger::verify`] for
+    /// that. Intended for offline verifiers that need to re-derive committed
+    /// values from the chain itself.
+    pub fn read_entries<P: AsRef<Path>>(dir: P) -> Result<Vec<LedgerEntry>, LedgerError> {
+        let entries = read_all(&dir.as_ref().join(LOG_FILE))?;
+        check_chain(&entries)?;
+        Ok(entries)
+    }
+
     /// Verify the integrity of a ledger on disk without opening it for writing.
+    ///
+    /// `sealed == false` in the report means no anchor was found: the chain is
+    /// internally consistent, but truncation cannot be ruled out. A deleted
+    /// anchor and a never-sealed log are indistinguishable.
     pub fn verify<P: AsRef<Path>>(dir: P) -> Result<VerifyReport, LedgerError> {
         let dir = dir.as_ref();
         let entries = read_all(&dir.join(LOG_FILE))?;
         check_chain(&entries)?;
 
-        let (actual_seq, actual_hash) = match entries.last() {
-            Some(e) => (e.seq, e.entry_hash.clone()),
-            None => (0, GENESIS_PREV.to_string()),
-        };
-
+        let (_, actual_hash) = chain_tail(&entries);
         let head_path = dir.join(HEAD_FILE);
         let sealed = head_path.exists();
         if sealed {
-            let raw = std::fs::read_to_string(&head_path)?;
-            let anchor: LedgerHead = serde_json::from_str(&raw)
-                .map_err(|e| LedgerError::Parse { line: 0, source: e })?;
-            let matches = anchor.head_seq == actual_seq
-                && anchor.head_hash == actual_hash
-                && anchor.count == entries.len() as u64;
-            if !matches {
-                return Err(LedgerError::HeadMismatch {
-                    anchor,
-                    actual_seq,
-                    actual_hash,
-                });
-            }
+            let anchor = read_head(&head_path)?;
+            check_anchor(&anchor, &entries)?;
         }
 
         Ok(VerifyReport {
@@ -300,9 +371,57 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn compute_entry_hash(seq: u64, ts: &str, kind: &str, prev_hash: &str, payload_fp: &str) -> String {
-    // Field-separated preimage; `\n` cannot appear inside any field.
+    // Field-separated preimage. `\n` cannot appear inside `ts`, `prev_hash` or
+    // `payload_fp`, and [`check_kind`] enforces the same for `kind`.
     let preimage = format!("{seq}\n{ts}\n{kind}\n{prev_hash}\n{payload_fp}");
     sha256_hex(preimage.as_bytes())
+}
+
+/// `kind` is part of the newline-delimited hash preimage, so caller-supplied
+/// tags are restricted to a short path-like token.
+fn check_kind(kind: &str) -> Result<(), LedgerError> {
+    let ok = !kind.is_empty()
+        && kind.len() <= 64
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(LedgerError::InvalidKind {
+            kind: kind.to_string(),
+        })
+    }
+}
+
+fn read_head(path: &Path) -> Result<LedgerHead, LedgerError> {
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(|e| LedgerError::Parse { line: 0, source: e })
+}
+
+/// `(head_seq, head_hash)` of a verified chain; an empty chain is the genesis.
+fn chain_tail(entries: &[LedgerEntry]) -> (u64, String) {
+    match entries.last() {
+        Some(e) => (e.seq, e.entry_hash.clone()),
+        None => (0, GENESIS_PREV.to_string()),
+    }
+}
+
+/// The anchor must describe exactly the chain it accompanies.
+fn check_anchor(anchor: &LedgerHead, entries: &[LedgerEntry]) -> Result<(), LedgerError> {
+    let (actual_seq, actual_hash) = chain_tail(entries);
+    if anchor.head_seq == actual_seq
+        && anchor.head_hash == actual_hash
+        && anchor.count == entries.len() as u64
+    {
+        Ok(())
+    } else {
+        Err(LedgerError::HeadMismatch {
+            anchor: anchor.clone(),
+            actual_seq,
+            actual_hash,
+        })
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -535,5 +654,122 @@ mod tests {
         ledger.seal().unwrap();
         assert!(Ledger::verify(&dir).unwrap().sealed);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn keep_lines(dir: &Path, keep: usize) {
+        let log = dir.join(LOG_FILE);
+        let content = std::fs::read_to_string(&log).unwrap();
+        let kept: Vec<&str> = content.lines().take(keep).collect();
+        std::fs::write(&log, kept.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn truncate_then_reopen_cannot_reanchor() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        for i in 0..6 {
+            l.append("observation", format!("event-{i}").as_bytes())
+                .unwrap();
+        }
+        l.seal().unwrap();
+
+        keep_lines(&dir, 4);
+
+        // Re-running the node in this directory must fail against the anchor
+        // rather than appending and re-sealing the shortened chain.
+        let err = Ledger::open(&dir).map(|_| ()).unwrap_err();
+        assert!(matches!(err, LedgerError::HeadMismatch { .. }), "got {err}");
+        assert!(Ledger::verify(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn seal_is_create_once_and_never_rewrites_the_anchor() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        l.append("observation", b"a").unwrap();
+        let first = l.seal().unwrap();
+        // Idempotent: re-sealing the same head returns the same anchor.
+        assert_eq!(l.seal().unwrap().head_hash, first.head_hash);
+
+        // Extending past the seal cannot produce a second anchor.
+        l.append("observation", b"b").unwrap();
+        let err = l.seal().unwrap_err();
+        assert!(
+            matches!(err, LedgerError::AlreadySealed { .. }),
+            "got {err}"
+        );
+
+        let anchor: LedgerHead =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(HEAD_FILE)).unwrap()).unwrap();
+        assert_eq!(anchor.head_hash, first.head_hash);
+        assert!(Ledger::verify(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sealed_ledger_is_final() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        l.append("observation", b"a").unwrap();
+        l.seal().unwrap();
+        let err = Ledger::open(&dir).map(|_| ()).unwrap_err();
+        assert!(
+            matches!(err, LedgerError::AlreadySealed { .. }),
+            "got {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deleted_anchor_is_reported_unsealed_not_verified() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        l.append("observation", b"a").unwrap();
+        l.seal().unwrap();
+
+        // Residual gap, asserted so it stays documented: deleting the anchor
+        // (and trimming the log) leaves a chain that is internally consistent.
+        std::fs::remove_file(dir.join(HEAD_FILE)).unwrap();
+        keep_lines(&dir, 0);
+        let report = Ledger::verify(&dir).unwrap();
+        assert!(!report.sealed);
+        assert_eq!(report.entries, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_entries_returns_a_verified_chain_only() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        l.append("observation", b"a").unwrap();
+        l.append("observation", b"b").unwrap();
+        l.seal().unwrap();
+
+        let entries = Ledger::read_entries(&dir).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].prev_hash, entries[0].entry_hash);
+
+        let log = dir.join(LOG_FILE);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let forged = text.replacen("\"kind\":\"observation\"", "\"kind\":\"observatioN\"", 1);
+        std::fs::write(&log, forged).unwrap();
+        assert!(Ledger::read_entries(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kind_is_constrained_so_it_cannot_break_the_preimage() {
+        let dir = tmp();
+        let mut l = Ledger::open(&dir).unwrap();
+        let long = "k".repeat(65);
+        for bad in ["", "observation\n0", "kind with space", long.as_str()] {
+            let err = l.append(bad, b"x").unwrap_err();
+            assert!(matches!(err, LedgerError::InvalidKind { .. }), "got {err}");
+        }
+        assert_eq!(l.len(), 0);
+        l.append("model-turn", b"x").unwrap();
+        assert_eq!(l.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -12,7 +12,7 @@
 ledger_dir = "./mnr-run"
 
 # Co-option drift level (0.0 .. 1.0) at which the node is pulled. This is the
-# "before it belongs to the swarm" line: the Verifier hemisphere's drift score
+# "before it belongs to the swarm" line: the Verifier role's drift score
 # crossing this trips an early teardown.
 drift_threshold = 0.75
 
@@ -24,8 +24,8 @@ ttl_secs = 300
 # Maximum observation steps before a clean pull, regardless of drift.
 max_steps = 500
 
-# Shared model-call budget across BOTH hemispheres. A two-hemisphere run draws
-# from this single pool, so a split run cannot buy itself extra calls.
+# Shared model-call budget across BOTH roles. A two-role run draws from this
+# single pool, so a split run cannot buy itself extra calls.
 budget = 4000
 
 # --- lab demo only (the bundled mock swarm) -------------------------------

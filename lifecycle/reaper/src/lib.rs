@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 pub enum TripReason {
     /// The hard time-to-live elapsed.
     Ttl,
-    /// The observer's Verifier hemisphere flagged co-option drift.
+    /// The observer's Verifier role flagged co-option drift.
     CoOption { drift: f64 },
     /// A configured anomaly threshold tripped.
     Anomaly { detail: String },

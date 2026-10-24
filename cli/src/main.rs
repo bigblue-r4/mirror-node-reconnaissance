@@ -4,6 +4,7 @@
 //!   demo            Run the observer against the bundled mock swarm, then seal
 //!                   and verify the witness log.
 //!   sparkle         Run the sealed-lab multi-probe sparkle demo.
+//!   sparkle verify  Recompute the aggregation and check it against the sealed chain.
 //!   ledger verify   Verify the integrity of a witness log on disk.
 //!   ledger show     Print a short summary of a witness log.
 //!
@@ -46,6 +47,7 @@ fn print_help() {
          mnr demo [--dir <path>]          Run the observer vs. the bundled mock swarm\n  \
          Friction options: --inject-friction --friction-budget <1..1024> --friction-threshold <0..drift_threshold>\n  \
          mnr sparkle [--probes N] [--ttl-ms MS] [--dir <path>]   Run the multi-probe sparkle demo\n  \
+         mnr sparkle verify [--dir <path>]   Recompute the aggregation from the probe ledgers and check the sealed chain\n  \
          mnr ledger verify [--dir <path>] Verify a witness log's integrity\n  \
          mnr ledger show   [--dir <path>] Summarize a witness log\n\n\
          Config: env MNR_* > configs/mnr.toml > defaults (see configs/mnr.toml.example)."
@@ -227,6 +229,9 @@ fn cmd_demo(args: &[String]) -> i32 {
                 "\nTry it: edit any line in {}/ledger.jsonl, then run `mnr ledger verify --dir {}` — verification will fail.",
                 cfg.ledger_dir, cfg.ledger_dir
             );
+            println!(
+                "Also try truncating that file and re-running the demo in the same directory: it refuses, because the sealed anchor is never rewritten. Use a fresh --dir for each run."
+            );
             0
         }
         Err(e) => {
@@ -265,6 +270,9 @@ fn apply_friction_args(cfg: &mut Config, args: &[String]) -> Result<(), String> 
 }
 
 fn cmd_sparkle(args: &[String]) -> i32 {
+    if let Some("verify") = args.first().map(String::as_str) {
+        return cmd_sparkle_verify(&args[1..]);
+    }
     let cfg = match sparkle::SparkleConfig::from_args(args) {
         Ok(c) => c,
         Err(e) => {
@@ -289,32 +297,75 @@ fn cmd_sparkle(args: &[String]) -> i32 {
     match controller.run_all_probes() {
         Ok(agg) => {
             println!(
-                "\n-- sparkle aggregation --\n{}
-               probes sealed, root={}…",
+                "\n-- sparkle aggregation --\n{} probes sealed, root={}…",
                 agg.num_probes,
                 &agg.aggregation_root[..16.min(agg.aggregation_root.len())]
             );
 
-            match sparkle::verify_sparkle_aggregation(&cfg.dir) {
-                Ok(report) => {
-                    println!(
-                        "OK: probes_verified={} all_probes_ok={} aggregate_ok={} root={}…",
-                        report.probes_verified,
-                        report.all_probes_ok,
-                        report.aggregate_ok,
-                        &report.aggregation_root[..16.min(report.aggregation_root.len())]
-                    );
-                    0
-                }
-                Err(e) => {
-                    eprintln!("SPARKLE VERIFY FAILED: {e}");
-                    1
-                }
+            let report = sparkle::verify_sparkle_aggregation(&cfg.dir);
+            print_sparkle_report(&report);
+            if report.verified() {
+                0
+            } else {
+                1
             }
         }
         Err(e) => {
             eprintln!("sparkle run failed: {e}");
             1
+        }
+    }
+}
+
+fn cmd_sparkle_verify(args: &[String]) -> i32 {
+    let mut dir = sparkle::SparkleConfig::default().dir;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dir" => match it.next() {
+                Some(value) => dir = value.clone(),
+                None => {
+                    eprintln!("usage: mnr sparkle verify [--dir <path>]");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!("unknown sparkle verify argument: {other}\n\nusage: mnr sparkle verify [--dir <path>]");
+                return 2;
+            }
+        }
+    }
+    let report = sparkle::verify_sparkle_aggregation(&dir);
+    print_sparkle_report(&report);
+    if report.verified() {
+        0
+    } else {
+        1
+    }
+}
+
+fn print_sparkle_report(report: &sparkle::VerifyReport) {
+    let root = &report.aggregation_root;
+    let short = &root[..16.min(root.len())];
+    if report.verified() {
+        println!(
+            "OK: probes_verified={} all_probes_ok={} aggregate_ok={} sealed={} root={short}…",
+            report.probes_verified, report.all_probes_ok, report.aggregate_ok, report.sealed
+        );
+    } else {
+        eprintln!(
+            "SPARKLE VERIFY FAILED: probes_verified={} all_probes_ok={} aggregate_ok={} sealed={} recomputed_root={short}…",
+            report.probes_verified, report.all_probes_ok, report.aggregate_ok, report.sealed
+        );
+        for error in &report.errors {
+            eprintln!("  - {error}");
+        }
+    }
+    if let Some(exported) = &report.exported_root {
+        if exported != root {
+            eprintln!(
+                "  warning: aggregate-root.json claims {exported}…, which is not the root recomputed from the chain"
+            );
         }
     }
 }
@@ -328,14 +379,21 @@ fn cmd_ledger(args: &[String]) -> i32 {
                     .unwrap_or_else(|_| "./mnr-run".into())
             });
             match Ledger::verify(&dir) {
-                Ok(r) => {
+                Ok(r) if r.sealed => {
                     println!(
-                        "OK: {} entries in {dir}, sealed={}, head={}…",
+                        "OK: {} entries in {dir}, sealed=true, head={}…",
                         r.entries,
-                        r.sealed,
                         &r.head_hash[..16.min(r.head_hash.len())]
                     );
                     0
+                }
+                Ok(r) => {
+                    eprintln!(
+                        "UNSEALED: {} entries in {dir} form an intact chain (head={}…), but there is no head anchor, so truncation cannot be ruled out. A deleted anchor and a never-sealed log look the same.",
+                        r.entries,
+                        &r.head_hash[..16.min(r.head_hash.len())]
+                    );
+                    1
                 }
                 Err(e) => {
                     eprintln!("VERIFY FAILED for {dir}: {e}");

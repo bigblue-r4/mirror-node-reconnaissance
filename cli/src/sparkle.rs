@@ -12,7 +12,7 @@
 //! 5. The final aggregate ledger is a standard `mnr-ledger` JSONL log that can be
 //!    verified with `mnr ledger verify`.
 
-use mnr_ledger::Ledger;
+use mnr_ledger::{Ledger, LedgerEntry};
 use mnr_observer::{MeteredEngine, MockEngine, Observer, SwarmConnector};
 use mnr_reaper::{execute_teardown, NodeState, Reaper, Secret, TripReason};
 use mnr_sim::MockSwarm;
@@ -227,20 +227,64 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// Canonical hash of a ledger directory: hash(ledger.jsonl || log-head.json).
+/// Domain tags for the two committed values. Versioned so a future format change
+/// cannot be confused with this one.
+pub const FRAGMENT_DOMAIN: &str = "mnr/sparkle-fragment/v1";
+pub const ROOT_DOMAIN: &str = "mnr/sparkle-root/v1";
+
+/// The exact bytes committed to the sealed chain for one probe. Verification
+/// rebuilds this from the probe directory alone, so nothing else may go in.
+pub fn fragment_payload(probe_id: u32, fragment_hash: &str) -> Vec<u8> {
+    format!("{FRAGMENT_DOMAIN}\n{probe_id}\n{fragment_hash}").into_bytes()
+}
+
+/// The exact bytes committed for the aggregation root.
+pub fn root_payload(num_probes: u32, root: &str) -> Vec<u8> {
+    format!("{ROOT_DOMAIN}\n{num_probes}\n{root}").into_bytes()
+}
+
+/// Canonical hash of a sealed ledger directory.
+///
+/// Length-prefixed and domain-separated so the boundary between the two files
+/// cannot be moved (the earlier version concatenated them with no separator).
 fn hash_ledger_fragment(ledger_dir: &Path) -> Result<String, String> {
-    let log_file = ledger_dir.join("ledger.jsonl");
-    let head_file = ledger_dir.join("log-head.json");
+    let log = fs::read(ledger_dir.join("ledger.jsonl")).map_err(|e| e.to_string())?;
+    let head = fs::read(ledger_dir.join("log-head.json")).map_err(|e| e.to_string())?;
 
-    let mut combined = Vec::new();
-    if log_file.exists() {
-        combined.extend_from_slice(&fs::read(&log_file).map_err(|e| e.to_string())?);
-    }
-    if head_file.exists() {
-        combined.extend_from_slice(&fs::read(&head_file).map_err(|e| e.to_string())?);
-    }
+    let mut h = Sha256::new();
+    h.update(b"mnr/sparkle-ledger-fragment/v1\0");
+    h.update((log.len() as u64).to_le_bytes());
+    h.update(&log);
+    h.update((head.len() as u64).to_le_bytes());
+    h.update(&head);
+    Ok(hex(&h.finalize()))
+}
 
-    Ok(sha256_hex(&combined))
+/// Probe directories under `<root>/probes`, ordered by numeric probe id so the
+/// Merkle root does not depend on directory iteration order.
+fn probe_dirs(root: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
+    let probes_dir = root.join("probes");
+    if !probes_dir.is_dir() {
+        return Err(format!("no probes directory at {}", probes_dir.display()));
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&probes_dir).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let id = name
+            .strip_prefix("probe-")
+            .and_then(|n| n.parse::<u32>().ok())
+            .ok_or_else(|| format!("unexpected entry in probes/: {name}"))?;
+        out.push((id, path));
+    }
+    out.sort_by_key(|(id, _)| *id);
+    Ok(out)
 }
 
 /// Compute Merkle root over a list of hashes.
@@ -306,9 +350,15 @@ impl SparkleController {
             // Run the probe
             let result = self.run_probe(probe_id, seed, &probe_dir)?;
 
-            // Verify the probe's ledger before adding to aggregation
-            Ledger::verify(&probe_dir)
-                .map_err(|e| format!("probe {} ledger verification failed: {}", probe_id, e))?;
+            // Verify the probe's ledger before adding to aggregation. An unsealed
+            // fragment cannot be anchored, so it cannot be aggregated.
+            let checked = Ledger::verify(&probe_dir)
+                .map_err(|e| format!("probe {probe_id} ledger verification failed: {e}"))?;
+            if !checked.sealed {
+                return Err(format!(
+                    "probe {probe_id} ledger is unsealed; aggregation needs a closed fragment"
+                ));
+            }
 
             // Compute fragment hash
             let fragment_hash = hash_ledger_fragment(&probe_dir)?;
@@ -421,7 +471,10 @@ impl SparkleController {
         } // observer dropped → releases ledger borrow
 
         // Teardown: seal and wipe
-        let _teardown = execute_teardown(trip.clone(), &ledger, &mut state);
+        let teardown = execute_teardown(trip.clone(), &ledger, &mut state);
+        if teardown.sealed_head.is_none() {
+            return Err(format!("probe {probe_id}: ledger seal failed"));
+        }
 
         let trip_reason = match trip {
             TripReason::Ttl => "ttl".to_string(),
@@ -440,7 +493,12 @@ impl SparkleController {
         })
     }
 
-    /// Write the aggregate ledger with fragment records.
+    /// Write the aggregate ledger.
+    ///
+    /// Each entry commits only values a verifier can rebuild from the probe
+    /// directory (probe id and fragment hash), and the root is committed last so
+    /// that it covers every fragment entry. Runtime statistics are not committed:
+    /// they are self-reported and would make the entries unverifiable.
     fn write_aggregate_ledger(
         &self,
         root_dir: &Path,
@@ -449,37 +507,36 @@ impl SparkleController {
         let agg_dir = root_dir.join("aggregate");
         fs::create_dir_all(&agg_dir).map_err(|e| e.to_string())?;
 
-        // Open aggregate ledger
         let mut agg_ledger = Ledger::open(&agg_dir).map_err(|e| e.to_string())?;
 
-        // Append one entry per fragment
         for frag in &aggregation.fragments {
-            let payload = serde_json::json!({
-                "probe_id": frag.probe_id,
-                "fragment_hash": frag.fragment_hash,
-                "final_drift": frag.final_drift,
-                "steps": frag.steps,
-                "trip_reason": frag.trip_reason,
-            });
-            let payload_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+            let payload = fragment_payload(frag.probe_id, &frag.fragment_hash);
             agg_ledger
-                .append("sparkle-fragment", &payload_bytes)
+                .append("sparkle-fragment", &payload)
                 .map_err(|e| e.to_string())?;
         }
 
-        // Seal the aggregate ledger
+        let num_probes = aggregation.fragments.len() as u32;
+        agg_ledger
+            .append(
+                "sparkle-root",
+                &root_payload(num_probes, &aggregation.aggregation_root),
+            )
+            .map_err(|e| e.to_string())?;
+
         agg_ledger.seal().map_err(|e| e.to_string())?;
 
-        // Write companion aggregate-root.json (metadata, not part of the sealed chain)
-        let root_file = agg_dir.join("aggregate-root.json");
+        // Exported copy for publishing the root. Verification never reads it:
+        // the authoritative value is the one committed in the sealed chain.
         let root_meta = serde_json::json!({
+            "note": "export copy only; verification recomputes the root from the probe ledgers and checks the sealed chain",
             "num_probes": aggregation.num_probes,
             "aggregation_root": aggregation.aggregation_root,
             "fragment_count": aggregation.fragments.len(),
             "sealed_at": aggregation.sealed_at,
         });
         let root_json = serde_json::to_string_pretty(&root_meta).map_err(|e| e.to_string())?;
-        fs::write(&root_file, root_json).map_err(|e| e.to_string())?;
+        fs::write(agg_dir.join("aggregate-root.json"), root_json).map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -489,74 +546,245 @@ impl SparkleController {
 // Verification
 // ============================================================================
 
-/// Verify a sparkle aggregation: check all probes' ledgers and the aggregate root.
-pub fn verify_sparkle_aggregation(dir: &str) -> Result<VerifyReport, String> {
+/// Verify a sparkle aggregation end to end.
+///
+/// The root is **recomputed** from the probe ledgers and then checked against the
+/// sealed aggregate chain, so verification trusts the chain rather than any file
+/// in the directory. `aggregate-root.json` is an exported copy for publishing and
+/// is only echoed back as [`VerifyReport::exported_root`].
+pub fn verify_sparkle_aggregation(dir: &str) -> VerifyReport {
     let root_dir = PathBuf::from(dir);
 
-    // Verify each probe's ledger
-    let probes_dir = root_dir.join("probes");
-    let mut probes_verified = 0;
-    let mut all_ok = true;
+    let probes = match probe_dirs(&root_dir) {
+        Ok(probes) if probes.is_empty() => {
+            return VerifyReport::failed(format!("no probe ledgers under {dir}"))
+        }
+        Ok(probes) => probes,
+        Err(e) => return VerifyReport::failed(e),
+    };
 
-    if probes_dir.exists() {
-        let entries = fs::read_dir(&probes_dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.is_dir() {
-                match Ledger::verify(&path) {
-                    Ok(_) => {
-                        probes_verified += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  probe {} verification failed: {}", path.display(), e);
-                        all_ok = false;
-                    }
+    // 1. Recompute each fragment hash from the probe directories.
+    let mut errors = Vec::new();
+    let mut probes_verified = 0u32;
+    let mut all_probes_ok = true;
+    let mut fragment_hashes = Vec::with_capacity(probes.len());
+    for (probe_id, path) in &probes {
+        match Ledger::verify(path) {
+            Ok(report) if report.sealed => probes_verified += 1,
+            Ok(_) => {
+                all_probes_ok = false;
+                errors.push(format!("probe {probe_id}: ledger is unsealed"));
+            }
+            Err(e) => {
+                all_probes_ok = false;
+                errors.push(format!("probe {probe_id}: {e}"));
+            }
+        }
+        match hash_ledger_fragment(path) {
+            Ok(hash) => fragment_hashes.push(hash),
+            Err(e) => {
+                all_probes_ok = false;
+                errors.push(format!("probe {probe_id}: cannot hash fragment: {e}"));
+                // Keep index alignment with `probes` so later checks report the
+                // right probe rather than silently shifting.
+                fragment_hashes.push(String::new());
+            }
+        }
+    }
+    let derived_root = compute_merkle_root(&fragment_hashes);
+
+    // 2. Check the aggregate chain: sealed, one fragment entry per probe in probe
+    //    order, then the root entry, each matching the recomputed value.
+    let agg_dir = root_dir.join("aggregate");
+    let mut sealed = false;
+    let mut aggregate_ok = false;
+    match Ledger::verify(&agg_dir) {
+        Err(e) => errors.push(format!("aggregate ledger: {e}")),
+        Ok(report) if !report.sealed => {
+            errors.push("aggregate ledger is unsealed".to_string());
+        }
+        Ok(_) => {
+            sealed = true;
+            match Ledger::read_entries(&agg_dir) {
+                Err(e) => errors.push(format!("aggregate ledger: {e}")),
+                Ok(entries) => {
+                    aggregate_ok = check_committed_entries(
+                        &entries,
+                        &probes,
+                        &fragment_hashes,
+                        &derived_root,
+                        &mut errors,
+                    );
                 }
             }
         }
     }
 
-    // Verify aggregate ledger
-    let agg_dir = root_dir.join("aggregate");
-    let agg_ok = if agg_dir.exists() {
-        Ledger::verify(&agg_dir).is_ok()
-    } else {
-        false
-    };
+    let exported_root = fs::read_to_string(agg_dir.join("aggregate-root.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|meta| meta["aggregation_root"].as_str().map(str::to_string));
 
-    // Load and verify aggregation root
-    let root_file = agg_dir.join("aggregate-root.json");
-    let root_hash = if root_file.exists() {
-        let raw = fs::read_to_string(&root_file).map_err(|e| e.to_string())?;
-        let meta: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        meta["aggregation_root"]
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    Ok(VerifyReport {
+    VerifyReport {
         probes_verified,
-        all_probes_ok: all_ok,
-        aggregate_ok: agg_ok,
-        aggregation_root: root_hash,
-    })
+        all_probes_ok,
+        aggregate_ok: aggregate_ok && sealed,
+        aggregation_root: derived_root,
+        exported_root,
+        sealed,
+        errors,
+    }
+}
+
+/// Compare the committed aggregate entries against the values recomputed from
+/// the probe directories. Returns whether the chain agrees with all of them.
+fn check_committed_entries(
+    entries: &[LedgerEntry],
+    probes: &[(u32, PathBuf)],
+    fragment_hashes: &[String],
+    derived_root: &str,
+    errors: &mut Vec<String>,
+) -> bool {
+    let mut ok = true;
+    let fragments: Vec<&LedgerEntry> = entries
+        .iter()
+        .filter(|e| e.kind == "sparkle-fragment")
+        .collect();
+    let roots: Vec<&LedgerEntry> = entries
+        .iter()
+        .filter(|e| e.kind == "sparkle-root")
+        .collect();
+
+    if entries.len() != probes.len() + 1 {
+        ok = false;
+        errors.push(format!(
+            "aggregate ledger holds {} entries; expected {} probes + 1 root",
+            entries.len(),
+            probes.len()
+        ));
+    }
+    if roots.len() != 1 {
+        ok = false;
+        errors.push(format!(
+            "expected exactly one sparkle-root entry, found {}",
+            roots.len()
+        ));
+    }
+
+    for (index, (probe_id, _)) in probes.iter().enumerate() {
+        let Some(entry) = fragments.get(index) else {
+            ok = false;
+            errors.push(format!("no committed fragment for probe {probe_id}"));
+            continue;
+        };
+        let expected = sha256_hex(&fragment_payload(*probe_id, &fragment_hashes[index]));
+        if entry.payload_fingerprint != expected {
+            ok = false;
+            errors.push(format!(
+                "probe {probe_id}: committed fragment does not match the probe ledger (seq {})",
+                entry.seq
+            ));
+        }
+    }
+
+    if let Some(root_entry) = roots.first() {
+        let expected = sha256_hex(&root_payload(probes.len() as u32, derived_root));
+        if root_entry.payload_fingerprint != expected {
+            ok = false;
+            errors.push(format!(
+                "committed aggregate root does not match the root recomputed from the probes (seq {})",
+                root_entry.seq
+            ));
+        }
+        if entries.last().map(|e| e.seq) != Some(root_entry.seq) {
+            ok = false;
+            errors.push(
+                "the sparkle-root entry is not the final entry of the aggregate chain".to_string(),
+            );
+        }
+    }
+
+    ok
 }
 
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
+    /// Probe ledgers whose chain and anchor both check out.
     pub probes_verified: u32,
     pub all_probes_ok: bool,
+    /// The aggregate chain agrees with the values recomputed from the probes.
     pub aggregate_ok: bool,
+    /// Root recomputed from the probe ledgers.
     pub aggregation_root: String,
+    /// Root echoed from the exported copy, when present. Never trusted.
+    pub exported_root: Option<String>,
+    /// Whether the aggregate ledger carries a head anchor.
+    pub sealed: bool,
+    pub errors: Vec<String>,
+}
+
+impl VerifyReport {
+    fn failed(message: String) -> Self {
+        VerifyReport {
+            probes_verified: 0,
+            all_probes_ok: false,
+            aggregate_ok: false,
+            aggregation_root: String::new(),
+            exported_root: None,
+            sealed: false,
+            errors: vec![message],
+        }
+    }
+
+    /// True only when every probe verified, the aggregate chain agrees with the
+    /// recomputed root, the chain is sealed, and nothing failed silently.
+    pub fn verified(&self) -> bool {
+        self.all_probes_ok && self.aggregate_ok && self.sealed && self.errors.is_empty()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp_dir() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("mnr-sparkle-test-{n}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn small_config(dir: &Path) -> SparkleConfig {
+        SparkleConfig {
+            num_probes: 2,
+            ttl_ms: 5_000,
+            budget_per_probe: 32,
+            swarm_len_per_probe: 5,
+            base_seed: 7,
+            dir: dir.display().to_string(),
+            ..SparkleConfig::default()
+        }
+    }
+
+    fn run_aggregation(dir: &Path) -> SparkleAggregation {
+        SparkleController::new(small_config(dir))
+            .run_all_probes()
+            .unwrap()
+    }
+
+    fn verify(dir: &Path) -> VerifyReport {
+        verify_sparkle_aggregation(&dir.display().to_string())
+    }
+
+    fn probe_log(dir: &Path, id: u32) -> PathBuf {
+        dir.join("probes")
+            .join(format!("probe-{id}"))
+            .join("ledger.jsonl")
+    }
 
     #[test]
     fn config_from_args_parses_correctly() {
@@ -603,5 +831,155 @@ mod tests {
         assert!(ts.contains('T'));
         assert!(ts.contains('Z'));
         assert!(ts.len() >= 19); // minimum ISO8601 length
+    }
+
+    #[test]
+    fn aggregation_verifies_end_to_end() {
+        let dir = tmp_dir();
+        let aggregation = run_aggregation(&dir);
+        let report = verify(&dir);
+        assert!(report.verified(), "errors: {:?}", report.errors);
+        assert_eq!(report.probes_verified, 2);
+        assert!(report.sealed);
+        assert_eq!(report.aggregation_root, aggregation.aggregation_root);
+        assert_eq!(
+            report.exported_root.as_deref(),
+            Some(aggregation.aggregation_root.as_str())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tampered_probe_ledger_fails_verification() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        let log = probe_log(&dir, 1);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let forged = text.replacen(
+            "\"payload_fingerprint\":\"",
+            "\"payload_fingerprint\":\"0",
+            1,
+        );
+        assert_ne!(forged, text, "test needs an entry to corrupt");
+        std::fs::write(&log, forged).unwrap();
+
+        let report = verify(&dir);
+        assert!(!report.verified());
+        assert!(!report.all_probes_ok);
+        assert!(
+            report.errors.iter().any(|e| e.contains("probe 1")),
+            "{:?}",
+            report.errors
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn truncated_probe_ledger_fails_verification() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        let log = probe_log(&dir, 0);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let kept: Vec<&str> = text.lines().take(1).collect();
+        std::fs::write(&log, kept.join("\n") + "\n").unwrap();
+
+        let report = verify(&dir);
+        assert!(!report.verified());
+        assert!(!report.all_probes_ok);
+        assert!(
+            report.errors.iter().any(|e| e.contains("anchor")),
+            "{:?}",
+            report.errors
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tampered_aggregate_chain_fails_verification() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        let agg_log = dir.join("aggregate").join("ledger.jsonl");
+        let text = std::fs::read_to_string(&agg_log).unwrap();
+        let forged = text.replacen(
+            "\"payload_fingerprint\":\"",
+            "\"payload_fingerprint\":\"f",
+            1,
+        );
+        std::fs::write(&agg_log, forged).unwrap();
+
+        let report = verify(&dir);
+        assert!(!report.verified());
+        assert!(!report.aggregate_ok);
+        assert!(
+            report.errors.iter().any(|e| e.contains("aggregate ledger")),
+            "{:?}",
+            report.errors
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_probe_directory_fails_verification() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        std::fs::remove_dir_all(dir.join("probes").join("probe-1")).unwrap();
+
+        let report = verify(&dir);
+        assert!(!report.verified());
+        assert!(!report.aggregate_ok);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn swapped_but_internally_valid_probe_still_fails() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+
+        // Replace one probe with a *valid, sealed* ledger from a different run.
+        // The probe itself verifies; only the committed fragment hash can tell.
+        let victim = dir.join("probes").join("probe-1");
+        std::fs::remove_dir_all(&victim).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        let mut replacement = Ledger::open(&victim).unwrap();
+        replacement
+            .append("observation", b"a different run")
+            .unwrap();
+        replacement.seal().unwrap();
+
+        let report = verify(&dir);
+        assert!(
+            report.all_probes_ok,
+            "the replacement ledger is internally valid: {:?}",
+            report.errors
+        );
+        assert!(!report.aggregate_ok);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("does not match the probe ledger")),
+            "{:?}",
+            report.errors
+        );
+        assert!(!report.verified());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exported_root_is_never_trusted() {
+        let dir = tmp_dir();
+        let aggregation = run_aggregation(&dir);
+        let export = dir.join("aggregate").join("aggregate-root.json");
+        let zeros = "0".repeat(64);
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&export).unwrap()).unwrap();
+        meta["aggregation_root"] = serde_json::Value::String(zeros.clone());
+        std::fs::write(&export, meta.to_string()).unwrap();
+
+        let report = verify(&dir);
+        assert!(report.verified(), "errors: {:?}", report.errors);
+        assert_eq!(report.aggregation_root, aggregation.aggregation_root);
+        assert_eq!(report.exported_root.as_deref(), Some(zeros.as_str()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

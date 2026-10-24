@@ -1,6 +1,6 @@
 [package]
 name = "mnr-ledger"
-description = "Out-of-band, tamper-evident SHA-256 witness log for Mirror Node Reconnaissance."
+description = "Tamper-evident SHA-256 witness log with a create-once head anchor, for Mirror Node Reconnaissance."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

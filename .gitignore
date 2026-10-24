@@ -1,6 +1,10 @@
 /target
 # Cargo.lock IS committed — this workspace ships a binary (reproducible builds).
-# runtime witness logs
+# runtime witness logs (paths used in README quickstart and experiments)
 /mnr-run
+/mnr-mutate
+/mnr-truncate
+/mnr-friction-run
+/sparkle-run
 **/*.rs.bk
 # configs/mnr.toml ships safe lab defaults; use MNR_CONFIG for local overrides.

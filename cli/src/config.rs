@@ -18,7 +18,7 @@ pub struct Config {
     pub ttl_secs: u64,
     /// Maximum observation steps before a clean pull.
     pub max_steps: u64,
-    /// Shared model-call budget across both hemispheres.
+    /// Shared model-call budget across both roles.
     pub budget: usize,
     /// Seed for the deterministic mock swarm.
     pub seed: u64,
