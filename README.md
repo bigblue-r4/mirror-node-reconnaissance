@@ -19,9 +19,10 @@ therefore cannot do is in [Limits](#limits), at the same level of detail.
 > **Status: early-stage (roughly TRL 3–4), and the product is the log, not the
 > swarm.** This repository ships the log, the seal, the bundle format, an
 > independent verifier, and a sealed lab that exercises all three under load.
-> It does not ship a signing key in the runtime ledger, a producer for the new
-> bundle format, a timestamp authority, or a network connector. Read
-> [Limits](#limits) before quoting a result.
+> It does not sign entries in the runtime ledger — only the exported v2 bundle is
+> signed — and it does not ship a producer for that bundle, a timestamp
+> authority, or a network connector. Read [Limits](#limits) before quoting a
+> result.
 
 ---
 
@@ -140,7 +141,7 @@ BLAKE3 and Ed25519 included — so it shares nothing with the Go encoders.
 | Unsigned v1 bundle | `UNAUTHENTICATED`, exit 3 — never `VERIFIED` |
 | `witness-bundle/2`, `scope=case` / `scope=log` / 7-leaf | `VERIFIED` — 4,301 / 5,895 / 3,560 B |
 | One bundle per log size 1…8 | All `VERIFIED`, with audit paths of 0–3 hashes |
-| Forged-but-signed bundles, 10 controls | Each rejected at the step that should catch it — `inclusion`, `proofs`, `scope`, `head`, `preimage` — with two signed controls that are honest verifying |
+| Forged-but-signed bundles, 10 controls | Each rejected at the step that should catch it — `inclusion`, `proofs`, `scope`, `head`, `preimage` — and two honest signed controls that must verify |
 
 ```bash
 python3 -m unittest discover -s tools/bundle-verify     # 47 tests
@@ -240,10 +241,9 @@ ledger's exact preimage and seal rules, and the reaper's teardown order.
 ## Design lineage
 
 MNR draws on two patterns from SGAIL's other work: split-brain role separation and
-witness-layer audit logging. This repository is the standalone prototype of those
-patterns, and the log it contains is the same log the farm and evidence-room
-applications run on — five implementations exist across the portfolio, two of
-them vendored copies. [CONSOLIDATION.md](CONSOLIDATION.md) maps them, argues for
+witness-layer audit logging. This repository is the Rust member of a family of
+five implementations of the witness log — two of them vendored copies — and the
+same pattern backs the farm and evidence-room applications. [CONSOLIDATION.md](CONSOLIDATION.md) maps them, argues for
 one importable core, and records the unresolved licensing question that blocks
 it. [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) is that proposal's first step worked
 out to the command level, rehearsed but not applied.
