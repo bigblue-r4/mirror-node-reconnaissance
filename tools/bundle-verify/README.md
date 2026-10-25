@@ -150,6 +150,11 @@ Ran 50 tests in 0.9s
 OK
 ```
 
+CI runs exactly that command on every push to `main` and on every pull request,
+as the `verifier` job in `.github/workflows/ci.yml`. It needs nothing installed —
+the point of a stdlib-only verifier is that a green run means the committed
+bundles were checked by code no producer shares, not that a wheel resolved.
+
 The suite covers:
 
 - **BLAKE3** against the published empty and `abc` vectors and against 16

@@ -89,6 +89,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `scripts/ci/sparkle-tamper.sh`, run by a new `aggregation` CI job: it runs a
   sparkle aggregation, asserts the untouched run verifies, alters one byte of a
   probe ledger, and asserts verification then exits 1 and names that probe.
+- A `verifier` CI job — `.github/workflows/ci.yml` now runs the independent
+  Python suite (`python3 -m unittest discover -s tools/bundle-verify`) on every
+  push and pull request, so the cross-implementation claim is checked by the
+  repository rather than by whoever remembers to run it. It installs nothing.
+  The workflow's push trigger is `main` only: `master` was listed and does not
+  exist, so it only ever promised a run that could not happen.
+
+### Changed
+- `Cargo.toml`'s `repository` is now `bigblue-r4/mirror-node-reconnaissance`,
+  the repository these commits are in. It named an `SGAIL` URL that resolves to
+  nothing public, and no crate inherited it, so `cargo metadata` reported each
+  package's home as unknown. All six crates now declare
+  `repository.workspace = true` and report the real URL.
 
 ### Fixed
 - Sparkle verification previously trusted `aggregate-root.json`, which was not

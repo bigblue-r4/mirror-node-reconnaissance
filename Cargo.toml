@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2021"
 license = "LicenseRef-Proprietary"
 authors = ["SGAIL LLC"]
-repository = "https://github.com/SGAIL/mirror-node-reconnaissance"
+repository = "https://github.com/bigblue-r4/mirror-node-reconnaissance"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

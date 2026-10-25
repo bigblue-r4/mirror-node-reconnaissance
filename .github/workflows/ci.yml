@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [master, main]
+    branches: [main]
   pull_request:
 
 env:
@@ -26,6 +26,17 @@ jobs:
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  verifier:
+    name: independent verifier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Standard library only: no pip, no BLAKE3 package, no lockfile to pin.
+      # This is the third implementation, so it must not share code with the
+      # producer it checks.
+      - name: The committed bundles verify against the spec, not the producer
+        run: python3 -m unittest discover -s tools/bundle-verify -t tools/bundle-verify -q
 
   aggregation:
     name: aggregation verification
