@@ -1,0 +1,3 @@
+{"bundle_id":"BUNDLE-20261025-eec29511","generated_at":"2026-10-25T17:01:22.595268222Z","case_number":"CASE-2026-0042","department":"Honolulu PD","node_id":"node-001","entry_count":2,"sha256_chain":"31ec34bc68dc0e9b59b51c444a4a9b07ce12a4c14116adf243b74315e7d28b96","entries":null}
+{"seq":1,"ts":"2026-05-12T14:30:00Z","level":"INFO","event":"pd/intake","source":"pd","data":{"case_number":"CASE-2026-0042","note":"tag a \u0026 b \u003cc\u003e"}}
+{"seq":2,"ts":"2026-05-12T14:31:00Z","level":"INFO","event":"pd/transfer","source":"pd","data":{"case_number":"CASE-2026-0042","current_node":"node-2","description":"white powder, sealed bag 3","event_type":"transfer","from_node":"node-1","item_id":"ITEM-7","notes":"chain of custody: é \u0026 \u003cseal\u003e"}}

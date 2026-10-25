@@ -8,3 +8,7 @@
 /sparkle-run
 **/*.rs.bk
 # configs/mnr.toml ships safe lab defaults; use MNR_CONFIG for local overrides.
+
+# Python bytecode from tools/bundle-verify
+__pycache__/
+*.pyc
