@@ -7,15 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `CONSOLIDATION.md` — a cross-repository decision document: the map of the
+  witness-log implementations (including two vendored copies) and the
+  applications built on them, an ordered proposal to extract one importable core
+  and retire the duplicates, and the unresolved licensing question that blocks
+  it. It records two findings outside this repository that motivate the
+  proposal: the head field set that neither the MAC nor the signature covers, and
+  a court-export implementation that exists twice in two repositories with
+  different signed fields. Documentation only; no code change, and nothing in it
+  has been executed.
+- `EXTRACTION_PLAN.md` — the rehearsed P0-2 plan from `CONSOLIDATION.md`: the
+  `witness` module layout, the pinned `go.mod`, the import rewrite and `go.mod`
+  change for each of the three consumers, CI gates, rollback, and a rehearsal log.
+  Documentation only; rehearsed in a scratch copy, not applied to any repository.
+- `BUNDLE_SCHEMA.md` — the P0-3 schema decision: `witness-bundle/2`, one
+  court-export format for the two forked implementations. States the exact signed
+  preimage, the entry-as-line-bytes leaf rule, the log head plus per-entry
+  inclusion proofs, an eight-step offline verification procedure, and the
+  byte-level rule that verifies bundles already issued under the old format
+  without re-signing them. Records six defects in the current format, each with
+  the code that shows it, and the rehearsed evidence: bundles from both
+  repositories verified by one verifier, and eleven tamper controls failing
+  closed. Documentation only; the format is proposed, not implemented.
+- `tools/bundle-verify/` — an independent verifier for `witness-bundle/2` and
+  for legacy v1 bundles, in Python with the standard library only, written from
+  the schema rather than from the Go producers. BLAKE3 and Ed25519 are
+  implemented locally so there is no dependency to share with the encoder. It
+  verifies bundles written and signed by both current implementations, the v2
+  shapes, and — in rehearsal — one bundle per log size from 1 to 8 records; it
+  reports an unsigned v1 bundle as `UNAUTHENTICATED` (exit 3) rather than
+  verified, and rejects forged-but-signed bundles at the step that catches each.
+  47 tests, with the bundles kept as frozen vectors. No effect on the Rust
+  crates; it is a cross-check of an external format, not a component of this
+  system.
 - `mnr sparkle verify [--dir <path>]` — recomputes the aggregation from the probe
   ledgers and checks it against the sealed aggregate chain, exiting nonzero on
   any disagreement. `mnr sparkle` now runs the same verification and inherits its
   exit code.
+- `VerifierContext` (observer) — the Verifier's prompt now carries the step
+  state *and* the Proposer's characterization, with three tests: the claim
+  reaches the Verifier, a downplaying Proposer is rejected while its `self_drift`
+  is discarded, and benign traffic is audited as consistent.
 - `Ledger::read_entries` — reads an on-disk ledger's entries after verifying the
   chain, so an offline verifier can re-derive committed values.
 - Aggregate entries now commit the fragment hash and the Merkle root as
   domain-separated, versioned payloads (`sparkle-fragment`, `sparkle-root`), so a
   verifier can rebuild them from the probe directories.
+- `scripts/ci/sparkle-tamper.sh`, run by a new `aggregation` CI job: it runs a
+  sparkle aggregation, asserts the untouched run verifies, alters one byte of a
+  probe ledger, and asserts verification then exits 1 and names that probe.
 
 ### Fixed
 - Sparkle verification previously trusted `aggregate-root.json`, which was not
@@ -42,6 +82,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot break the newline-delimited hash preimage.
 
 ### Changed
+- **README repositioned around the witness log — the product — instead of the
+  swarm lab.** It leads with what the log answers, then with the two deployments
+  it was built for: a poultry house (restart catch-up, a silent-house alarm, a
+  record that survives a claim) and a police evidence room (intake you can prove
+  was not edited, and a bundle the other side can check offline). The lab is
+  presented as the load on the log and the appendix, per P2-7 in
+  `CONSOLIDATION.md`. Duplicated caveat prose is consolidated into one `Limits`
+  section; nothing was dropped except repetition — the one item that had no home
+  in `THREAT_MODEL.md` (only the friction variables fail closed) is stated there
+  too. Measured verifier results and the `scope=log` rule found by building the
+  verifier are now on the front page rather than buried in the appendix.
+- **The Verifier now audits the Proposer instead of re-scoring the message.**
+  `Observer::step` hands the Verifier a `VerifierContext` — the step state plus
+  the Proposer's parsed view — and the mock Verifier's `agree` flag becomes a
+  consistency check on `self_drift`, `stance` and `dialect` against its own
+  reading, naming every field that failed in its note. The Verifier's `drift`
+  remains the only authoritative score: the Proposer's `self_drift` never feeds
+  the alarm. `mnr demo` prints the per-step audit verdict.
+- `MockEngine` accepts either context shape, preferring `VerifierContext`, and
+  reports a Proposer-less prompt as "no characterization supplied" rather than
+  silently skipping the audit.
 - `sparkle::verify_sparkle_aggregation` returns a `VerifyReport` with an explicit
   `verified()` predicate and collected errors, instead of a `Result` whose caller
   ignored the flags.
@@ -55,10 +116,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Documentation rewritten against the implementation.** README is restructured
   around what the code does, with a dual-use/misuse section and a "what this does
   not show" section, and drops the grant-showcase framing and the
-  production-use claim. ARCHITECTURE now records that the Verifier role is not
-  given the Proposer's output, that `MockEngine` drift is marker arithmetic, that
-  only the friction variables fail closed, and that the reaper does not touch the
-  connector. THREAT_MODEL withdraws the evidentiary claim, scopes the drift
+  production-use claim. ARCHITECTURE recorded that the Verifier role was not
+  given the Proposer's output (since closed — see the first entry in this
+  section), that `MockEngine` drift is marker arithmetic, that only the friction
+  variables fail closed, and that the reaper does not touch the connector. THREAT_MODEL withdraws the evidentiary claim, scopes the drift
   mitigation, and adds a dual-use risk section. AUTHORIZATION adds an
   availability-impact cap and the private reporting channel; `proxy/README.md`
   drops proposal framing and shows the current `SwarmConnector` signature.

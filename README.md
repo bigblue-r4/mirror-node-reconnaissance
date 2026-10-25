@@ -1,114 +1,97 @@
-# Mirror Node Reconnaissance (MNR)
+# Witness logging — MNR
 
-> A short-lived instrument for observing an adversarial agent collective from the
-> inside — with a tamper-evident record of what it saw, and a lifecycle that
-> pulls it out before it can be co-opted.
+> An append-only record of what a system saw and did, chained and sealed so that
+> editing it afterwards is detectable — and exportable as a bundle a third party
+> can check on their own machine, without trusting the one that wrote it.
 
-MNR is a Rust workspace exploring one question: **can you instrument an untrusted
-multi-agent collective from the inside and still trust what you learned?** The
-shipped code is a sealed lab in which a simulated observer reads synthetic swarm
-traffic, scores its own exposure, writes a hash-chained witness log, and tears
-itself down when its lease expires.
+Mirror Node Reconnaissance is a Rust workspace built around one component: **a
+witness log that survives a dispute.** The log answers three questions:
 
-It is deliberately small: four library crates and one CLI, no network code, no
-model backend. Everything runs in-process against a bundled mock.
+| Question | Answer |
+|---|---|
+| Was this record edited after it was written? | A SHA-256 chain: an edit breaks its own `entry_hash` and every `prev_hash` after it |
+| Was anything dropped off the end? | A create-once `log-head.json` anchor. A sealed log cannot be reopened, extended or re-anchored |
+| Can a stranger check it? | `witness-bundle/2` — Ed25519 over a specified byte string, the node's signed head, one Merkle inclusion proof per entry — and a verifier that shares no code with the producers |
 
-> **Status: early-stage research prototype (roughly TRL 3–4).** Lab-validated
-> components, not an integrated capability. Nothing here connects to an external
-> system, and the central control — co-option detection — is demonstrated only
-> against the bundle's own deterministic stand-in for a model. Read
-> [What this does not show](#what-this-does-not-show) before citing any result,
-> and [Dual use and misuse risk](#dual-use-and-misuse-risk) before shipping it
-> anywhere.
+Payloads are never stored, only their SHA-256 fingerprints. What the log
+therefore cannot do is in [Limits](#limits), at the same level of detail.
+
+> **Status: early-stage (roughly TRL 3–4), and the product is the log, not the
+> swarm.** This repository ships the log, the seal, the bundle format, an
+> independent verifier, and a sealed lab that exercises all three under load.
+> It does not ship a signing key in the runtime ledger, a producer for the new
+> bundle format, a timestamp authority, or a network connector. Read
+> [Limits](#limits) before quoting a result.
 
 ---
 
-## What the code does
+## Two deployments it was built for
 
-Three mechanisms, each bounded and testable in isolation:
+The log is not a demo looking for a use. Two applications in this portfolio run
+on it, and they pull in opposite directions: one is a building full of animals,
+the other is a property room with a chain of custody.
 
-1. **A witness log.** Every observed message and every model turn is reduced to a
-   SHA-256 fingerprint and hash-chained into an append-only JSONL file, then
-   closed by a create-once head anchor. Edits and truncation are detectable by
-   anyone who cannot write the ledger directory; a sealed log cannot be reopened,
-   extended or re-anchored. The guarantee is conditional and narrow — see
-   [Trust boundary of the witness log](#trust-boundary-of-the-witness-log).
-2. **An observer with two reasoning roles.** Each message is characterized by a
-   *Proposer* role and independently scored by a *Verifier* role, which produces
-   the authoritative **co-option drift** value. Both roles draw on one shared,
-   capped call budget, so a two-role run cannot buy itself extra calls. In the
-   demo both roles are backed by the same deterministic `MockEngine`: separate
-   prompts, same model call function, and drift computed from a fixed marker
-   list. That is a mechanism demonstration, not evidence of detection.
-3. **A lifecycle controller.** A time-to-live plus trip conditions (drift,
-   anomaly, manual pull) bound a run. On a trip, the ledger is sealed and the
-   node's own transient secrets and buffers are overwritten. The reaper acts on
-   the local node only; it has no code path that touches anything else.
+### The farm — a poultry house that restarts, and the alarm at 03:00
 
-## What is code vs. concept
+A controller watches temperature, feed and water across a house of twenty
+thousand birds. Two things go wrong that a witness log fixes:
 
-| Component | Path | Status |
-|---|---|---|
-| Witness ledger | `core/ledger/` | **Code** — SHA-256 chain, create-once `log-head.json` anchor, CLI verification |
-| Observer (Proposer/Verifier roles) | `harness/agent/` | **Code** — shared budget metering, drift scoring, per-step witnessing |
-| Lifecycle controller (reaper) | `lifecycle/reaper/` | **Code** — TTL/trip checks, seal-then-wipe, best-effort volatile zeroing |
-| Bundled synthetic swarm | `sim/mock-swarm/` | **Code** — the only connector; a lab fixture with simulated counters |
-| CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle`, `ledger verify`, `ledger show` |
-| Lab-only request emission ("friction") | `harness/agent/` | **Code, off by default** — mock connector only; dual-use, see below |
-| A model backend | — | **Not included** — the `Engine` trait is the seam; `MockEngine` ships |
-| A real swarm connector | — | **Not included** — `SwarmConnector` has exactly one implementation |
-| Interception / dialect shaping | `proxy/` | **Concept only** — [`proxy/README.md`](proxy/README.md), no working code |
+- **The controller restarts.** When it comes back, the question is not "what does
+  the dashboard say" but "what was recorded while it was down, and is the gap in
+  the feed or in the record?" A chain sealed before the restart makes those two
+  distinguishable, and a log that is already sealed cannot be quietly extended
+  forward to hide the hole.
+- **The house goes silent.** Ventilation fails, the birds stop moving, the
+  alarm trips. Six weeks later, in a claim with an insurer or a buyer, the
+  question is whether the alarm was raised then — or written into the record
+  afterwards. A sealed head that left the building at the time is the difference
+  between a story and a record.
 
-## Dual use and misuse risk
+What the deployment supplies: the sensor gateway that writes entries, the alarm
+rule, and a custodian for the retained head. What the log supplies: the part of
+the account nobody can renegotiate later. The poultry application itself lives
+in `harborlight-poultry-demo` (its `internal/farm` package), not in this
+repository.
 
-Most of this repository is defensive substrate: an audit log, a role-separated
-observer, a kill switch. One component is not, and it deserves to be named
-plainly rather than buried.
+### The evidence room — intake a clerk can defend
 
-**The dual-use part is request emission** (`Observer::emit_friction` with
-`SwarmConnector::emit`). It generates schema-valid but semantically incomplete
-requests — a lease with no token, a self-reference, a dangling identifier — and
-sends them to whatever connector is attached. The intent in the lab is to
-measure how a collective reacts to ambiguity. Pointed at a real collective, the
-same code would consume peers' verification work: an **availability-degradation
-effect, i.e. DoS-like, not reconnaissance**. It does not observe more; it makes
-the target do more work.
+An item is booked, moved, released, re-sealed. Each event is a line in the log.
+Three questions come up, and a hash chain plus a signed bundle answers all three:
 
-What the shipped code actually contains:
+- **Was this item in the log?** A v2 bundle carries the node's signed head and a
+  proof per entry, so a bundle can no longer be assembled from an unlogged draft
+  slice and pass — which the current v1 format permits, because nothing in it
+  ties the entries to the log.
+- **Has anything changed since intake?** Any edit to a booked entry breaks the
+  chain from that point on; removing trailing entries disagrees with the seal.
+- **Can the other side check it themselves?** Yes: an offline verifier and two
+  pinned public keys — the node that kept the log and the exporter that produced
+  the bundle. No access to our systems, no trust in our dashboard.
 
-- The only connector is the in-process mock (`sim/mock-swarm/`), so the emission
-  path terminates in a queue and a counter. There is no transport.
-- Volume is bounded: total emissions capped at 1–1024, at most one per observed
-  step, suspended above a configured drift threshold, and suspended after TTL.
-- Each attempt is witnessed before emission, dry-run through the parser the mock
-  would use, and charged against the same call budget as reasoning.
+Two police implementations already exist (`kiss-protocol`'s `cmd/witness-pd` and
+`slate`) and they forked the same export file into two formats with different
+signed fields. [BUNDLE_SCHEMA.md](BUNDLE_SCHEMA.md) is the one format that
+replaces both; the verifier in [tools/bundle-verify/](tools/bundle-verify/README.md)
+already checks bundles from each, so migrating records already issued does not
+mean re-signing them.
 
-What those controls do **not** provide: any measurement of impact on a real
-target, any rate limit expressed against a real system, any consent or
-authorization mechanism, and any remote kill switch. They bound the lab fixture,
-not a deployment.
+Legal weight also needs a head retained outside the node at seal time (a
+timestamp authority, a co-signing party, a ticket) and timestamps that are not
+self-reported. Neither is implemented here; see [Limits](#limits).
 
-If a real connector were written, this repository would be a weak
-denial-of-service tool, and its use would require a specific authorized,
-consented engagement with an explicit availability-impact cap — not merely
-"the target is hostile". That is also why `proxy/` is a written problem statement
-with no implementation. Report misuse as described in
-[Reporting](#reporting).
+## Try it now (sealed lab)
 
-## Quickstart (sealed lab)
+The lab is the load: a simulated observer reads synthetic swarm traffic, writes
+every step to the log, and tears itself down when its lease expires.
 
 ```bash
 cargo build
-cargo test --workspace     # 36 tests: ledger, observer, reaper, sim, CLI
+cargo test --workspace     # 47 tests: ledger, observer, reaper, sim, CLI
 
-# Run the observer against the bundled synthetic swarm:
 cargo run -p mnr-cli --bin mnr -- demo --dir ./mnr-run
-
-# Verify the resulting witness log:
 cargo run -p mnr-cli --bin mnr -- ledger verify --dir ./mnr-run
 ```
 
-The demo streams synthetic traffic whose lure pressure escalates with dwell time.
 Drift rises through `observing → engaging → adopting`, the threshold trips, the
 node is pulled, and the log is sealed and verified. Two tampering experiments,
 each from a fresh run:
@@ -126,143 +109,147 @@ head -n 3 ./mnr-truncate/ledger.jsonl > /tmp/short \
 cargo run -p mnr-cli --bin mnr -- demo --dir ./mnr-truncate          # exits 1
 ```
 
-**A sealed log is final**, so use a fresh `--dir` for each run; re-running the
-demo against a sealed directory exits 1 by design. Deleting the anchor is
-reported as `UNSEALED` rather than `OK`, because a missing anchor is
-indistinguishable from a log that was never sealed.
+**A sealed log is final**, so use a fresh `--dir` for each run; re-running against
+a sealed directory exits 1 by design. Deleting the anchor is reported as
+`UNSEALED` rather than `OK`, because a missing anchor is indistinguishable from a
+log that was never sealed.
 
 Multi-probe runs seal one ledger per probe and commit their aggregation to a
-second ledger. Verification recomputes that aggregation from the probe ledgers:
+second ledger, which verification recomputes:
 
 ```bash
 cargo run -p mnr-cli --bin mnr -- sparkle --probes 4 --dir ./sparkle-run
 cargo run -p mnr-cli --bin mnr -- sparkle verify --dir ./sparkle-run   # exits 0
 ```
 
-`sparkle verify` exits nonzero if a probe ledger fails or is unsealed, a probe was
-swapped for a different (even internally valid) ledger, the aggregate chain was
-edited, or the committed root disagrees with the recomputed one.
+`sparkle verify` exits nonzero if a probe ledger fails or is unsealed, if a probe
+was swapped for a different (internally valid) ledger, if the aggregate chain was
+edited, or if the committed root disagrees with the recomputed one.
 
-## Trust boundary of the witness log
+## Verification, measured
 
-The ledger detects tampering; it does not prevent it, and its guarantee is
-narrower than "tamper-proof".
+Third-party checking is the product, so it is stated as results rather than as
+intent. The verifier is Python with no dependencies, written from the schema —
+BLAKE3 and Ed25519 included — so it shares nothing with the Go encoders.
 
-- **What is detected.** Any edit to a past entry (the hash chain breaks), any
-  truncation of trailing entries (the recomputed tail disagrees with the anchor),
-  and any attempt to extend and re-anchor a sealed log (`open()` refuses a sealed
-  directory; `seal()` never rewrites an existing anchor).
-- **Who it holds against.** A party who can read the ledger but cannot write the
-  ledger directory — including the observer node once it has been pulled, since a
-  sealed log is closed to it.
-- **What it cannot do.** There is no key, MAC or signature: only SHA-256. Anyone
-  who can write the whole directory can delete `ledger.jsonl` and
-  `log-head.json`, rebuild a consistent chain, seal it, and pass verification.
-- **What evidentiary use would need.** The head hash has to leave the node: copy
-  it into separate custody at seal time (a timestamp authority, a co-signing
-  party, or a ticket). The repository does not implement that step, and the
-  timestamps inside the log are self-reported wall-clock values, so nothing here
-  is a trusted timestamp or a legal artifact.
-- **What is not secret.** Payloads are stored as SHA-256 fingerprints. With a
-  small input domain — the mock's six- and five-entry word tables, for instance —
-  a fingerprint can be inverted by guessing.
+| Input | Result |
+|---|---|
+| Bundle issued by `kiss-protocol/internal/pd/export` (v1) | `VERIFIED` — 904 B, HTML-escaped payload bytes intact |
+| Bundle issued by `slate/internal/export` (v1) | `VERIFIED` — 889 B, `prev_hash` + `agency`/`seal` |
+| Zero-entry v1 bundle | `VERIFIED` — 419 B, the `"entries":null` rule reproduced from the spec |
+| Unsigned v1 bundle | `UNAUTHENTICATED`, exit 3 — never `VERIFIED` |
+| `witness-bundle/2`, `scope=case` / `scope=log` / 7-leaf | `VERIFIED` — 4,301 / 5,895 / 3,560 B |
+| One bundle per log size 1…8 | All `VERIFIED`, with audit paths of 0–3 hashes |
+| Forged-but-signed bundles (11 controls) | Each rejected at the step that should catch it |
 
-## What this does not show
+```bash
+python3 -m unittest discover -s tools/bundle-verify     # 47 tests
+python3 tools/bundle-verify/verify_bundle.py BUNDLE.ndjson --pin HEX [--pin HEX ...]
+```
 
-These are the claims the code cannot support yet, listed so nobody has to
-discover them the hard way.
+Building it changed the spec: `scope=log` originally said only "`case_number`
+empty", which lets a bundle claim to be the whole log and ship a subset, because
+every shipped entry's proof is genuine. Step 7 now also requires
+`entry_count == log_head.size`. See [BUNDLE_SCHEMA.md](BUNDLE_SCHEMA.md) §4.7.
+[`tools/bundle-verify/README.md`](tools/bundle-verify/README.md) has usage, exit
+codes and the limits of what it can judge.
 
-- **Drift scoring is not validated detection.** Under `MockEngine`, drift is
-  arithmetic over eight literal marker substrings: `+0.16` when a message
-  contains one, `-0.03` otherwise, clamped to `0..1`. There is no evaluation, no
-  baseline, no false-positive measurement, and no adversary that knows it is
-  being observed. A real model would produce a different — and unmeasured —
-  score.
-- **The Verifier does not see the Proposer's output.** Both roles receive the
-  message and the prior drift; the Verifier scores the message independently.
-  The "audit the proposer's characterization" instruction exists in the system
-  prompt, but the Proposer's answer is not passed in. The roles are separated;
-  the audit chain is not yet closed. Under the mock, both roles also land on the
-  same number, so "their disagreement is the alarm" is not implemented — the
-  alarm is drift crossing the threshold.
-- **The friction effect is simulated.** Uncertainty, re-verification and
-  "virtual processing ticks" are counters incremented by the mock. Nothing
-  measures wall-clock, economic or availability cost on a real system.
-- **Aggregation verification is local, not a portable proof.**
-  `mnr sparkle verify` recomputes every fragment hash and the Merkle root from the
-  probe ledgers and checks them against the sealed aggregate chain, so a swapped
-  probe, a deleted probe, an edited chain or a rewritten root is caught. But a
-  third party still needs the whole probe directory tree, and the root commits to
-  fragment hashes rather than to the probes' plaintext.
-- **Only the friction variables fail closed.** A malformed
-  `MNR_FRICTION_BUDGET`, `MNR_FRICTION_THRESHOLD` or `MNR_INJECT_FRICTION` is an
-  error, but a malformed `MNR_TTL_SECONDS` (or any other non-friction `MNR_*`
-  value) is silently ignored in favour of the file or the default. A typo in the
-  TTL therefore shortens containment without warning.
-- **`Observer::run` ignores the leash.** The convenience loop does not consult
-  the reaper and does not emit friction; TTL enforcement and emission live in the
-  CLI's own loop. Use `step()` plus your own loop if you need both.
-- **Wiping is best-effort.** `Secret` and `NodeState` overwrite their buffers
-  with volatile writes and clear them. Copies made earlier — reallocation during
-  construction, `format!` temporaries, the allocator itself, swap or hibernation
-  — are outside their reach. The crate comment already notes that `zeroize` would
-  be the stronger choice.
-- **An interrupted run is unsealed.** Entries and the anchor are fsynced, but a
-  crash before sealing leaves a chain that verifies only as `UNSEALED`, and the
-  directory entry itself is not fsynced.
-- **It is a single-process demo.** No multi-node coordination, no scheduling, no
-  evidence export, no model backend, no connector.
+## Limits
 
-What would move these from "demonstrated mechanism" to "measured capability":
-several model backends behind the same `Engine` trait, a scoring function
-evaluated against an adversary that knows it is observed, false-positive cost
-measured at fixed TTL, and a single-role baseline to show the second role earns
-its budget.
+The log detects tampering; it does not prevent it, and its guarantee is narrower
+than "tamper-proof". This section is the short version of
+[THREAT_MODEL.md](THREAT_MODEL.md) §4.
 
-## Friction injection (lab only)
+- **Custody-dependent.** There is no key, MAC or signature in the runtime ledger —
+  only SHA-256. A party who can write the whole directory can delete
+  `ledger.jsonl` and `log-head.json`, rebuild a consistent chain, seal it and pass
+  verification. Exporting the head to separate custody at seal time is what would
+  bind it; the repository does not do that step.
+- **No trusted time.** Timestamps are self-reported wall-clock values, and
+  `iso_now()` falls back to the Unix epoch if the clock read fails. Nothing here
+  is a trusted timestamp or by itself a legal artifact.
+- **Fingerprints are not confidential.** With a small input domain a SHA-256
+  fingerprint can be inverted by guessing. The log limits bulk disclosure, not a
+  determined reader.
+- **A crash before sealing leaves `UNSEALED`.** Entries and the anchor are
+  fsynced; the directory entry is not.
+- **Wiping is best-effort.** Volatile zero writes miss allocator copies,
+  `format!` temporaries, swap and hibernation images.
+- **The new bundle format has no producer yet.** `witness-bundle/2` is a
+  specification plus a verifier; the Go producers still write v1 and are being
+  reconciled per [CONSOLIDATION.md](CONSOLIDATION.md).
+- **Aggregation is local, not a portable proof.** `mnr sparkle verify` needs the
+  whole probe directory tree, and the root commits to fragment hashes rather
+  than to plaintext.
+- **The lab's detection is not validated.** Under `MockEngine`, drift is
+  arithmetic over eight literal marker substrings (`+0.16` per lure, `-0.03`
+  otherwise, clamped). The Verifier does audit the Proposer's claim — a test
+  feeds it a downplaying Proposer and it rejects the claim — but both roles
+  derive drift from the same markers, so an honest mock Proposer always agrees,
+  and there is no measured false-positive rate and no adversary that adapts. A
+  real model would produce an unmeasured score.
+- **`Observer::run` ignores the leash.** TTL enforcement and emission live in the
+  CLI's loop; `run()` does not consult the reaper and does not emit friction.
+- **Only the friction variables fail closed.** A malformed `MNR_FRICTION_BUDGET`,
+  `MNR_FRICTION_THRESHOLD` or `MNR_INJECT_FRICTION` is an error, but a malformed
+  `MNR_TTL_SECONDS` is silently ignored in favour of the file or the default — a
+  typo shortens containment without warning.
+- **Single process.** No multi-node coordination, no scheduling, no evidence
+  export command, no model backend, no connector.
 
-Off by default; the default `configs/mnr.toml` has `inject_friction = false`.
+## Friction injection (lab only, off by default)
+
+One component is not defensive substrate: request emission
+(`Observer::emit_friction` + `SwarmConnector::emit`) generates schema-valid but
+semantically incomplete requests and sends them to the attached connector. It is
+not reconnaissance — against a real collective it consumes peers' verification
+work, an **availability-degradation effect, i.e. DoS-like.** It ships inert: the
+only connector is the in-process mock, volume is capped at 1–1024 and one per
+observed step, gated by drift and TTL, dry-run against the mock's parser, and
+witnessed before emission.
 
 ```bash
 cargo run -p mnr-cli --bin mnr -- demo --inject-friction \
   --friction-budget 8 --friction-threshold 0.40 --dir ./mnr-friction-run
 ```
 
-Each attempt charges one Proposer call, is dry-run through the mock's strict
-decoder, is witnessed as a `friction_point` before emission, then charges one
-emission from the same shared pool. The mock queues it, bumps its uncertainty and
-re-verification counters, and echoes it back; the observer recognises its own echo
-only through an outstanding local receipt matching the entire envelope and epoch,
-once. Replays and altered bodies take the normal scoring path. The queue and
-receipt window each hold at most 32 messages, and a full queue returns
-immediately instead of blocking.
+[THREAT_MODEL.md](THREAT_MODEL.md) §5 is the full account: what those bounds do
+and do not cover, and why a real connector would require written authorization
+with an agreed availability-impact cap. `proxy/` is a written problem statement
+with no implementation for the same reason.
 
-The witness stores only `SHA-256(payload || epoch_nonce)`, where the nonce is
-derived from the ledger tip and counter. That is audit separation, not secrecy:
-it is public and reconstructible, so it does not protect payloads from guessing.
+## Where the pieces live
 
-Volume and gating: total emissions capped at 1–1024, at most one per observed
-step, suspended above the friction threshold, at the drift alarm, after TTL, or
-when the receipt window is full. Budget exhaustion leaves a witnessed attempt
-un-emitted. None of this bounds impact on a real target — see
-[Dual use and misuse risk](#dual-use-and-misuse-risk).
-
-## Architecture
+| Component | Path | Status |
+|---|---|---|
+| Witness ledger | `core/ledger/` | **Code** — SHA-256 chain, create-once anchor, verification |
+| Observer (Proposer/Verifier roles) | `harness/agent/` | **Code** — shared call budget, audited drift, per-step witnessing |
+| Lifecycle controller (reaper) | `lifecycle/reaper/` | **Code** — TTL/trip checks, seal-then-wipe |
+| Bundled synthetic swarm | `sim/mock-swarm/` | **Code** — the only connector; a lab fixture |
+| CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle`, `ledger verify`, `ledger show` |
+| Court-export format | `BUNDLE_SCHEMA.md` | **Specification** — proposed; v1 bundles still verify |
+| Independent bundle verifier | `tools/bundle-verify/` | **Code** — Python, no dependencies, 47 tests |
+| A model backend | — | **Not included** — the `Engine` trait is the seam |
+| A real swarm connector | — | **Not included** — one implementation exists |
+| Interception / dialect shaping | `proxy/` | **Concept only** — [`proxy/README.md`](proxy/README.md) |
 
 [ARCHITECTURE.md](ARCHITECTURE.md) has the component diagram, the honest account
 of the split-brain mechanism (logical role separation, not tensor isolation), the
 ledger's exact preimage and seal rules, and the reaper's teardown order.
-[THREAT_MODEL.md](THREAT_MODEL.md) states the adversary and what each mitigation
-does and does not cover. [AUTHORIZATION.md](AUTHORIZATION.md) sets the lab-only
-posture and the rules of engagement any real deployment would require.
 
 ## Design lineage
 
-MNR draws on two patterns from SGAIL's other work: split-brain role separation
-and witness-layer audit logging. This repository is a standalone prototype of
-those patterns applied to reconnaissance. It does not claim that either component
-is in production use, and no result here should be read as evidence about a
-deployed system.
+MNR draws on two patterns from SGAIL's other work: split-brain role separation and
+witness-layer audit logging. This repository is the standalone prototype of those
+patterns, and the log it contains is the same log the farm and evidence-room
+applications run on — five implementations exist across the portfolio, two of
+them vendored copies. [CONSOLIDATION.md](CONSOLIDATION.md) maps them, argues for
+one importable core, and records the unresolved licensing question that blocks
+it. [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) is that proposal's first step worked
+out to the command level, rehearsed but not applied.
+
+Nothing in those documents has been executed, and no result here should be read
+as evidence about a deployed system.
 
 ## Reporting
 
