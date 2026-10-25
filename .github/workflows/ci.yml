@@ -26,3 +26,16 @@ jobs:
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  aggregation:
+    name: aggregation verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the mnr binary
+        run: cargo build -p mnr-cli
+      - name: Aggregation verifies, and a tampered probe breaks it
+        run: scripts/ci/sparkle-tamper.sh
