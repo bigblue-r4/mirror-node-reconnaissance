@@ -17,12 +17,11 @@ Payloads are never stored, only their SHA-256 fingerprints. What the log
 therefore cannot do is in [Limits](#limits), at the same level of detail.
 
 > **Status: early-stage (roughly TRL 3–4), and the product is the log, not the
-> swarm.** This repository ships the log, the seal, the bundle format, an
-> independent verifier, and a sealed lab that exercises all three under load.
-> It does not sign entries in the runtime ledger — only the exported v2 bundle is
-> signed — and it does not ship a producer for that bundle, a timestamp
-> authority, or a network connector. Read [Limits](#limits) before quoting a
-> result.
+> swarm.** This repository ships the log, the seal, the bundle format, a producer
+> and signer for it, an independent verifier, and a sealed lab that exercises
+> them under load. It does not sign entries in the runtime ledger — only the
+> exported v2 bundle is signed — and it has no timestamp authority and no network
+> connector. Read [Limits](#limits) before quoting a result.
 
 ---
 
@@ -87,7 +86,7 @@ every step to the log, and tears itself down when its lease expires.
 
 ```bash
 cargo build
-cargo test --workspace     # 47 tests: ledger, observer, reaper, sim, CLI
+cargo test --workspace     # 72 tests: bundle, ledger, observer, reaper, sim, CLI
 
 cargo run -p mnr-cli --bin mnr -- demo --dir ./mnr-run
 cargo run -p mnr-cli --bin mnr -- ledger verify --dir ./mnr-run
@@ -127,6 +126,37 @@ cargo run -p mnr-cli --bin mnr -- sparkle verify --dir ./sparkle-run   # exits 0
 was swapped for a different (internally valid) ledger, if the aggregate chain was
 edited, or if the committed root disagrees with the recomputed one.
 
+## Export a bundle
+
+`mnr bundle export` writes `witness-bundle/2` from a whole-log file in the store
+shape `kiss-protocol` and `slate` write: one JSON object per line, `seq`
+numbered `1..=n`, entries carried through byte for byte. The lab's own
+`ledger.jsonl` is a different primitive — SHA-256 fingerprints, numbering from
+zero — and is not a bundle input; it is refused at the first line.
+
+```bash
+cargo run -p mnr-cli --bin mnr -- bundle keygen --out ./node.key
+cargo run -p mnr-cli --bin mnr -- bundle keygen --out ./exporter.key
+
+cargo run -p mnr-cli --bin mnr -- bundle export \
+  --log ./entries.ndjson --out ./case.ndjson \
+  --scope case --case CASE-2026-0042 \
+  --node-key ./node.key --exporter-key ./exporter.key \
+  --department "Honolulu PD" --node-id node-001
+```
+
+The command prints the two public keys; those are what a recipient pins:
+
+```bash
+python3 tools/bundle-verify/verify_bundle.py ./case.ndjson \
+  --pin <exporter key> --pin <node key>
+```
+
+Keys are 32-byte seeds in files created `0600`, and the command never overwrites
+an existing key or bundle: an issued bundle is evidence, so a new export gets a
+new path. `--scope log` discloses the whole log; `--scope case` discloses only
+the matching entries, with proofs taken from the full tree.
+
 ## Verification, measured
 
 Third-party checking is the product, so it is stated as results rather than as
@@ -140,11 +170,13 @@ BLAKE3 and Ed25519 included — so it shares nothing with the Go encoders.
 | Zero-entry v1 bundle | `VERIFIED` — 419 B, the `"entries":null` rule reproduced from the spec |
 | Unsigned v1 bundle | `UNAUTHENTICATED`, exit 3 — never `VERIFIED` |
 | `witness-bundle/2`, `scope=case` / `scope=log` / 7-leaf | `VERIFIED` — 4,301 / 5,895 / 3,560 B |
+| Bundle written by `mnr bundle export` (Rust), 12-entry log | `VERIFIED` — 5,895 B; root, `sha256_chain` and all 12 proof paths identical to the Go-produced fixture over the same entry lines |
+| Same producer, `scope=case`, 3 of 7 entries | `VERIFIED` — 2,052 B; proof indices 1, 4, 6 at seqs 2, 5, 7 |
 | One bundle per log size 1…8 | All `VERIFIED`, with audit paths of 0–3 hashes |
 | Forged-but-signed bundles, 10 controls | Each rejected at the step that should catch it — `inclusion`, `proofs`, `scope`, `head`, `preimage` — and two honest signed controls that must verify |
 
 ```bash
-python3 -m unittest discover -s tools/bundle-verify     # 47 tests
+python3 -m unittest discover -s tools/bundle-verify     # 49 tests
 python3 tools/bundle-verify/verify_bundle.py BUNDLE.ndjson --pin HEX [--pin HEX ...]
 ```
 
@@ -176,9 +208,16 @@ than "tamper-proof". This section is the short version of
   fsynced; the directory entry is not.
 - **Wiping is best-effort.** Volatile zero writes miss allocator copies,
   `format!` temporaries, swap and hibernation images.
-- **The new bundle format has no producer yet.** `witness-bundle/2` is a
-  specification plus a verifier; the Go producers still write v1 and are being
-  reconciled per [CONSOLIDATION.md](CONSOLIDATION.md).
+- **The producer signs the head it mints.** `mnr bundle export` computes the
+  tree head from the log file it is given and signs it with the node key, so a
+  bundle proves the node signed *that* tree — not that the tree was the node's
+  whole log. Feed it a truncated log and it produces a smaller, valid bundle. A
+  head retained outside the node at seal time is what would make the size and
+  root independent of the node; that step is still missing.
+- **The stores still write v1.** The producer reads a whole-log NDJSON in the
+  store shape; `slate` and `kiss-protocol` are not wired to it yet. Their port is
+  the Go `bundle` package in [BUNDLE_SCHEMA.md](BUNDLE_SCHEMA.md) §7, and until
+  that lands their bundles remain v1.
 - **Aggregation is local, not a portable proof.** `mnr sparkle verify` needs the
   whole probe directory tree, and the root commits to fragment hashes rather
   than to plaintext.
@@ -195,8 +234,8 @@ than "tamper-proof". This section is the short version of
   `MNR_FRICTION_THRESHOLD` or `MNR_INJECT_FRICTION` is an error, but a malformed
   `MNR_TTL_SECONDS` is silently ignored in favour of the file or the default — a
   typo shortens containment without warning.
-- **Single process.** No multi-node coordination, no scheduling, no evidence
-  export command, no model backend, no connector.
+- **Single process.** No multi-node coordination, no scheduling, no model
+  backend, no connector.
 
 ## Friction injection (lab only, off by default)
 
@@ -227,9 +266,10 @@ with no implementation for the same reason.
 | Observer (Proposer/Verifier roles) | `harness/agent/` | **Code** — shared call budget, audited drift, per-step witnessing |
 | Lifecycle controller (reaper) | `lifecycle/reaper/` | **Code** — TTL/trip checks, seal-then-wipe |
 | Bundled synthetic swarm | `sim/mock-swarm/` | **Code** — the only connector; a lab fixture |
-| CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle`, `ledger verify`, `ledger show` |
-| Court-export format | `BUNDLE_SCHEMA.md` | **Specification** — proposed; v1 bundles still verify |
-| Independent bundle verifier | `tools/bundle-verify/` | **Code** — Python, no dependencies, 47 tests |
+| Bundle producer and signer | `core/bundle/` | **Code** — `witness-bundle/2` header, preimage, Merkle proofs, Ed25519 signing |
+| CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle`, `ledger verify`, `ledger show`, `bundle keygen`, `bundle export` |
+| Court-export format | `BUNDLE_SCHEMA.md` | **Specification** — implemented by `mnr bundle export`; v1 bundles still verify |
+| Independent bundle verifier | `tools/bundle-verify/` | **Code** — Python, no dependencies, 49 tests |
 | A model backend | — | **Not included** — the `Engine` trait is the seam |
 | A real swarm connector | — | **Not included** — one implementation exists |
 | Interception / dialect shaping | `proxy/` | **Concept only** — [`proxy/README.md`](proxy/README.md) |

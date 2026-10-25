@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `core/bundle/` and `mnr bundle keygen` / `mnr bundle export` — the producer and
+  signer for `witness-bundle/2`, which until now existed as a schema and a
+  verifier only. A BLAKE3 Merkle tree with leaf-first audit paths, the §4.3
+  preimage built field by field rather than by serialising a struct, Ed25519 over
+  the header and over `size ‖ root` for the node's head. Entry lines are carried
+  byte for byte; a log with a sequence gap, a CRLF, or a header value containing
+  a line break is refused instead of re-encoded, because a reformatted entry is
+  a different leaf. Keys are 32-byte seeds in `0600` files, and an existing key
+  or bundle is never overwritten. The first Rust-produced bundles are committed
+  as verifier fixtures: over the same 12 entry lines a Go emitter used, the root,
+  `sha256_chain` and all 12 proof paths are identical, and the independent
+  Python verifier reports `VERIFIED` for that bundle and for a filtered
+  case-scoped one. 20 crate tests and 2 CLI integration tests; the Python suite
+  is now 49.
 - `CONSOLIDATION.md` — a cross-repository decision document: the map of the
   witness-log implementations (including two vendored copies) and the
   applications built on them, an ordered proposal to extract one importable core
@@ -37,9 +51,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shapes, and — in rehearsal — one bundle per log size from 1 to 8 records; it
   reports an unsigned v1 bundle as `UNAUTHENTICATED` (exit 3) rather than
   verified, and rejects forged-but-signed bundles at the step that catches each.
-  47 tests, with the bundles kept as frozen vectors. No effect on the Rust
-  crates; it is a cross-check of an external format, not a component of this
-  system.
+  49 tests, with the bundles kept as frozen vectors. It is a cross-check of an
+  external format, not a component of this system, and it now checks two bundles
+  written by the producer below.
 - `mnr sparkle verify [--dir <path>]` — recomputes the aggregation from the probe
   ledgers and checks it against the sealed aggregate chain, exiting nonzero on
   any disagreement. `mnr sparkle` now runs the same verification and inherits its

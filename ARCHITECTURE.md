@@ -167,8 +167,9 @@ fields is a hard error.
 
 ## 6. Testing
 
-`cargo test --workspace` runs 47 tests. They are deterministic: `MockEngine` plus
-a seeded `MockSwarm`, no backend and no network.
+`cargo test --workspace` runs 72 tests. The lab tests are deterministic:
+`MockEngine` plus a seeded `MockSwarm`, no backend and no network. The bundle
+tests sign their own keys and check the output against a Go-produced fixture.
 
 - **ledger (13)** — append/verify round-trip, empty log, mutation detection,
   truncation detection via anchor, truncated-then-reopened rejection, seal
@@ -181,14 +182,22 @@ a seeded `MockSwarm`, no backend and no network.
   its `self_drift` is discarded, and benign traffic is audited as consistent.
 - **reaper (3)** — TTL expiry, teardown seals and wipes, secret wipe.
 - **sim (3)** — determinism per seed, exact message count, rising lure pressure.
-- **CLI unit (13)** — config validation, friction CLI overrides, and the sparkle
-  suite: end-to-end aggregation verification, tampered/truncated probe ledgers,
+- **bundle (20)** — Merkle roots and audit paths for logs of 1–9 leaves and for
+  a Go-produced fixture's own entry lines; the §4.3 preimage byte for byte; the
+  case filter and its proofs; signature verification in both roles; refusals of
+  CRLF, blank lines, sequence gaps, unknown scopes, empty required fields, and
+  line breaks in header values; a log bundle and a zero-entry bundle.
+- **CLI unit (15)** — config validation, friction CLI overrides, the sparkle
+  suite (end-to-end aggregation verification, tampered/truncated probe ledgers,
   a tampered aggregate chain, a missing probe directory, a probe swapped for a
-  different valid ledger, and an edited export copy that must not be trusted.
-- **CLI integration (8)** — the sealed-lab friction suite: shared-budget
+  different valid ledger, and an edited export copy that must not be trusted),
+  and bundle timestamp formatting plus flag parsing.
+- **CLI integration (10)** — the sealed-lab friction suite (shared-budget
   exhaustion, disabled/threshold/TTL gating, bounded queue, exact echo
   attribution versus spoof and replay, organic traffic preservation, fail-closed
-  witness writes, and both normal and zero-TTL sealing paths.
+  witness writes, and both normal and zero-TTL sealing paths), plus `mnr bundle
+  keygen`/`export` end to end and the refusals that keep an issued bundle from
+  being replaced.
 
 CI (`.github/workflows/ci.yml`, stable Rust) runs `cargo fmt --all --check`,
 `cargo build --workspace --all-targets`, `cargo test --workspace` and

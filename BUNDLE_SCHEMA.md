@@ -1,8 +1,9 @@
 # One Court-Export Bundle Format — `witness-bundle/2`
 
-**Status:** proposal for decision. Schema agreed here, no producer written yet;
+**Status:** proposal for decision. Schema agreed here; a reference producer and
+signer ship in [core/bundle/](core/bundle/) behind `mnr bundle export`, and
 [tools/bundle-verify/](tools/bundle-verify/README.md) is an independent verifier
-for it and for the legacy path.
+for the format and the legacy path.
 **Snapshot:** `kiss-protocol` at `4aa41c0`, `slate` at `c198ce0`, 2026-10-25.
 **Implements:** P0-3 in [CONSOLIDATION.md](CONSOLIDATION.md) — the schema half,
 before documentation is merged and before `cmd/witness-pd` is retired.
@@ -390,7 +391,7 @@ about is not a schema:
 
 Then the same claims from outside Go. `tools/bundle-verify/` is a Python
 verifier written from §4.3 and §6.1 — standard library only, no shared code with
-the producers — with the bundles kept as frozen vectors and 47 tests. Sizes are
+the producers — with the bundles kept as frozen vectors and 49 tests. Sizes are
 the committed fixtures; they differ from the runs above by a byte or two because
 `generated_at` and the bundle id are per-run.
 
@@ -403,6 +404,8 @@ the committed fixtures; they differ from the runs above by a byte or two because
 | `v2-case.ndjson`, 4,301 B | scratch emitter, §4 | `VERIFIED`, 4 entries, head 500 |
 | `v2-log.ndjson`, 5,895 B | scratch emitter, §4 | `VERIFIED`, 12 entries, head 12 |
 | `v2-seven.ndjson`, 3,560 B | scratch emitter, §4 | `VERIFIED`, 7 entries, 3-hash paths |
+| `v2-rust-log.ndjson`, 5,895 B | `mnr bundle export`, §4 in Rust | `VERIFIED`, 12 entries; root, `sha256_chain` and every proof path identical to `v2-log.ndjson` |
+| `v2-rust-case.ndjson`, 2,052 B | `mnr bundle export`, §4 in Rust | `VERIFIED`, 3 of 7 entries at seqs 2, 5, 7 |
 
 One bundle per log size from 1 to 8 records also verified — audit paths of 0, 1,
 2, 2, 3, 3, 3 and 3 hashes — so the tree walk agrees with `merkle.Prove` on
@@ -420,10 +423,13 @@ newline smuggled into a header value (`preimage`). A control case signs a
 consistent bundle the same way and verifies, so each failure is the check under
 test rather than the harness.
 
-The one thing this does not prove: the v1 half is genuinely cross-implementation
-— two products wrote those files — while the v2 half is not. v2 has no producer
-yet, so its vectors come from a scratch Go emitter built from this document.
-When `slate` first issues v2, that fixture should be replaced with one it wrote.
+What this still does not prove: no **product** has written a v2 bundle. The v2
+vectors come from a scratch Go emitter and, since the producer landed, from
+`mnr bundle export`, which reproduces the Go emitter's root, `sha256_chain` and
+all twelve proof paths over the same entry lines (Appendix B). Two encoders
+written from this document and agreeing byte for byte is stronger evidence than
+one, but neither is `slate`. When it first issues v2, its bundle should join
+these fixtures rather than replace the evidence that the format is portable.
 
 ### 6.3 Policy
 
@@ -478,8 +484,12 @@ Consumers:
 - **`kiss-protocol`** keeps `cmd/witness` and `store.Export`/`VerifyExport`;
   `internal/pd/export` is deleted with the `witness-pd` retirement (P0-3's second
   half).
-- **`mirror-node-reconnaissance`** is unaffected; its ledger is a different
-  primitive and P2-5 still asks whether it should exist at all.
+- **`mirror-node-reconnaissance`** now carries a reference producer. Its ledger
+  is a different primitive — SHA-256 fingerprints, no Merkle tree and no signed
+  head — so the producer reads a whole-log NDJSON in the store shape rather than
+  that ledger, and this crate is a second implementation of §4, not the product
+  path. The Go `bundle` package above is still where `slate` and `kiss` land;
+  P2-5 still asks whether the ledger should exist at all.
 
 Outside that package, and deliberately not shipped with it:
 `tools/bundle-verify/` in this repository holds the Python verifier and its
@@ -550,6 +560,11 @@ checking.
   thing that can tell a deliberate change to §4.3 from an accident of one
   encoder. Its remaining gap is stated there: no v2 fixture has been written by
   a product yet.
+- **A reference producer exists.** `core/bundle/` encodes and signs §4, and
+  `mnr bundle export` writes a bundle whose output the independent verifier
+  accepts (§6.2, Appendix B). This shows the format is implementable outside Go;
+  it does not satisfy the `witness` module item above, and products still write
+  v1 until that lands.
 
 ## Appendix A — claims and where to check them
 
@@ -604,7 +619,7 @@ go test ./internal/pd/export/ -run TestP03V2Prototype -v
 
 # independent verifier: Python 3.12, standard library only, from the spec
 python3 -m unittest discover -s tools/bundle-verify
-  Ran 47 tests  OK
+  Ran 49 tests  OK
 
 python3 tools/bundle-verify/verify_bundle.py testdata/v1-kiss.ndjson --pin …
   VERIFIED               904 B, kiss-issued
@@ -620,6 +635,21 @@ python3 … testdata/v2-log.ndjson --pin … --pin …
   VERIFIED               5895 B, 12 entries, head 12 leaves
 python3 … testdata/v2-seven.ndjson --pin … --pin …
   VERIFIED               3560 B, 7 entries, 3-hash audit paths
+
+# reference producer written from §4 in Rust: core/bundle, mnr bundle export
+cargo run -p mnr-cli --bin mnr -- bundle keygen --out /tmp/node.key
+cargo run -p mnr-cli --bin mnr -- bundle keygen --out /tmp/exporter.key
+  seed files created 0600; public keys printed for pinning
+cargo run -p mnr-cli --bin mnr -- bundle export \
+  --log /tmp/farm-entries.ndjson --out /tmp/rust-log.ndjson --scope log …
+  head root 0b0250f7…, 12 entries
+python3 … /tmp/rust-log.ndjson --pin … --pin …
+  VERIFIED               5895 B; root, sha256_chain and all 12 proof paths
+                         identical to v2-log.ndjson, written by the Go emitter
+python3 … /tmp/rust-case.ndjson --pin … --pin …
+  VERIFIED               2052 B, 3 of 7 entries, indices 1/4/6 at seqs 2/5/7
+refused: newline in --department (exit 1), --scope case without --case (exit 2),
+         overwrite of an existing bundle (exit 1), a log with a seq gap (exit 1)
 
 # tree shapes: one scope=log bundle per log size, from real stores
 n=1 path_len=0  n=2 path_len=1  n=3 path_len=2  n=4 path_len=2
@@ -640,11 +670,14 @@ n=5 path_len=3  n=6 path_len=3  n=7 path_len=3  n=8 path_len=3
   control, signed and consistent      VERIFIED
 ```
 
-The fixtures are checked in at `tools/bundle-verify/testdata/`; the emitters were
-scratch programs (one per repository, plus one written from §4 for the v2 shapes)
-and are not kept, because a fixture is only useful if it is what a producer
-expected to write at that snapshot.
+The fixtures are checked in at `tools/bundle-verify/testdata/`. The Go emitters
+were scratch programs (one per repository, plus one written from §4 for the v2
+shapes) and are not kept, because a fixture is only useful if it is what a
+producer expected to write at that snapshot. The two `v2-rust-*` files were
+written by the committed producer instead: the seeds for that run were generated
+in `/tmp` and discarded, and only the two public keys are kept beside them.
 
-Tests: 11 Go subtests across the three scratch files and 47 Python tests across
-the verifier suite, all green at the snapshot above. Every number quoted in this
-document comes from one of those runs.
+Tests: 11 Go subtests across the three scratch files, 20 `mnr-bundle` tests, 2
+CLI integration tests and 49 Python tests across the verifier suite, all green at
+the snapshot above. Every number quoted in this document comes from one of those
+runs.

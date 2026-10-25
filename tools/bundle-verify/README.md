@@ -5,7 +5,10 @@ A verifier for the two court-export bundle formats, written from
 and no build system with the Go producers. That independence is the point: the
 claim under test is that `witness-bundle/2` is a specification rather than one
 repository's encoder, and a verifier in the same language as the encoder cannot
-show that. It closes the last item of §10 of the schema document.
+show that. It closes the last item of §10 of the schema document. Since the Rust
+producer landed (`core/bundle`, `mnr bundle export`), the v2 half is also checked
+across two implementations: fixtures written by that producer are verified here
+and compared field by field against the Go emitter's fixtures.
 
 It handles two things:
 
@@ -118,19 +121,23 @@ throwaway and the records are fictional.
 | `v2-case.ndjson` | scratch emitter, §4 | 4,301 B | `scope=case`, 4 entries out of a real 500-record log, 9-hash audit paths |
 | `v2-log.ndjson` | scratch emitter, §4 | 5,895 B | `scope=log`, all 12 entries, `entry_count == log_head.size` |
 | `v2-seven.ndjson` | scratch emitter, §4 | 3,560 B | a 4+3 split whose right subtree splits again; 3-hash paths |
+| `v2-rust-log.ndjson` | `mnr bundle export` (Rust) | 5,895 B | the same 12 entry lines as `v2-log.ndjson`; root, chain and proofs must match it |
+| `v2-rust-case.ndjson` | `mnr bundle export` (Rust) | 2,052 B | 3 entries out of 7 at seqs 2, 5, 7; indices 1, 4, 6 |
 
-v2 has no producer yet, so those three were written by a scratch Go program
-built from §4 alone, then deleted; the bundles and their public keys are kept
-as frozen vectors. Regenerate them when the format changes — do not hand-edit a
-fixture, because a fixture that no longer matches what a producer writes is a
-test that proves nothing.
+The three scratch-emitter files were written by a Go program built from §4
+alone, then deleted; the bundles and their public keys are kept as frozen
+vectors. The two `v2-rust-*` files were written by the committed Rust producer;
+the keys for that run were generated in `/tmp` and discarded, so only the public
+halves are kept. Regenerate a fixture when the format changes — do not hand-edit
+one, because a fixture that no longer matches what a producer writes is a test
+that proves nothing.
 
 ## Tests
 
 ```console
 $ python3 -m unittest discover -s tools/bundle-verify -v
 ...
-Ran 47 tests in 0.7s
+Ran 49 tests in 0.8s
 OK
 ```
 

@@ -138,6 +138,8 @@ emission path above is — it only means the kill switch is not an attack surfac
   [AUTHORIZATION.md](AUTHORIZATION.md).
 - **Compromise before deployment is out of scope.** A model or engine that is
   already adversarial when the run starts defeats both roles at once.
-- **No multi-node, no recovery, no evidence export.** A crash before sealing
-  leaves an unsealed log; nothing coordinates several nodes; nothing packages a
-  log for a third party.
+- **No multi-node, no recovery, and no export of the runtime ledger.** A crash
+  before sealing leaves an unsealed log, and nothing coordinates several nodes.
+  `mnr bundle export` packages a whole-log NDJSON in the store shape (the one
+  `kiss-protocol` and `slate` write), not this crate's fingerprint ledger, so the
+  runtime log itself still has no evidence-export path.
