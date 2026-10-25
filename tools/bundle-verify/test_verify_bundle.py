@@ -360,6 +360,29 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(result.header["log_head"]["size"], 7)
         self.assertEqual(len(result.header["proofs"][0]["path"]), 3)
 
+    def test_rust_producer_log_bundle_verifies(self):
+        # Written by `mnr bundle export` from the same twelve entry lines the Go
+        # fixture carries. The root and chain must agree byte for byte, which is
+        # the cross-language check of the leaf rule and the tree split.
+        result = vb.verify(fixture("v2-rust-log.ndjson"),
+                           pins("v2-rust.export.pub", "v2-rust.node.pub"))
+        self.assertEqual(result.status, "VERIFIED")
+        self.assertEqual(result.entries, 12)
+        go = header_of(fixture("v2-log.ndjson"))
+        self.assertEqual(result.header["log_head"]["root"], go["log_head"]["root"])
+        self.assertEqual(result.header["sha256_chain"], go["sha256_chain"])
+
+    def test_rust_producer_case_bundle_verifies(self):
+        # Three entries from a seven-record log, at non-contiguous seqs: the
+        # proofs are taken from the full tree and their indices are seq-1.
+        result = vb.verify(fixture("v2-rust-case.ndjson"),
+                           pins("v2-rust.export.pub", "v2-rust.node.pub"))
+        self.assertEqual(result.status, "VERIFIED")
+        self.assertEqual(result.entries, 3)
+        self.assertEqual(result.header["log_head"]["size"], 7)
+        self.assertEqual([proof["seq"] for proof in result.header["proofs"]],
+                         [2, 5, 7])
+
     def test_unknown_header_keys_are_ignored(self):
         # The rehearsal prototype still emitted v1's "entries":null placeholder.
         # Unknown keys are outside the preimage, so the bundle must still pass.
