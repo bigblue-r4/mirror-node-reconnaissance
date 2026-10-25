@@ -19,7 +19,7 @@ go build -o slate ./cmd/slate
 ```
 
 Base: `c198ce0` — *release: v1.5.0 — signed truncation anchor*.
-Patch: `slate-v2-producer.patch` — 2,350 lines added, 49 removed, across 30 files.
+Patch: `slate-v2-producer.patch` — 2,396 lines added, 78 removed, across 34 files.
 Toolchain used: Go 1.25.3 (the module declares `go 1.22`).
 
 ## What it changes
@@ -33,7 +33,8 @@ Toolchain used: Go 1.25.3 (the module declares `go 1.22`).
 | `internal/bundle/testdata/` | new — the six v2 vectors and their public keys, copied from `tools/bundle-verify/testdata/` |
 | `cmd/slate/main.go` | `export` defaults to v2, `--format=1` escape hatch; `/api/export` defaults to v2 with `"format": 1`; `exportSigningKeys` |
 | `cmd/slate/export_integration_test.go` | new — 4 tests: API default, legacy path, unknown format, output location |
-| `internal/export/export.go` | `DecodePrivateKey` extracted from `Sign` |
+| `internal/export/export.go` | `DecodePrivateKey` extracted from `Sign`; `WriteNDJSON` now reports a failed close |
+| `cmd/slate/main.go`, `internal/{discovery,store}/…` | the 28 unchecked errors that kept `slate`'s lint step red — see [below](#the-lint-gate) |
 | `README.md`, `docs/*` | export usage, the format, how to verify, the legacy flag |
 
 Behaviour:
@@ -72,19 +73,13 @@ ok  github.com/bigblue-r4/slate/internal/evidence
 ok  github.com/bigblue-r4/slate/internal/peer
 ok  github.com/bigblue-r4/slate/internal/query
 ok  github.com/bigblue-r4/slate/internal/store
+$ golangci-lint run ./...
+0 issues.
 ```
 
 18 tests and 35 subtests in `internal/bundle`, 4 more in `cmd/slate`. No new
 dependency: the package still imports only `internal/store`, the standard library
 and BLAKE3.
-
-`golangci-lint` v2.15.0 with default linters reports **16 issues before the patch
-and 16 after** — the same pre-existing `errcheck` findings in `internal/discovery`,
-`internal/store` and `cmd/slate`, so `slate`'s lint step is already red at
-`c198ce0` and this patch is not what turned it red. `internal/bundle` on its own
-reports 0. The one finding the patch did add — `QF1012` on a
-`WriteString(fmt.Sprintf(...))` in `Preimage` — is fixed with
-`strconv.FormatUint`.
 
 End to end, against a real store built with `slate init` and three intakes:
 
@@ -127,6 +122,37 @@ The two-key, four-record export is committed as
 with its public keys, and the Python suite verifies it on every run. That closes
 the schema's stated gap — until now no product had written a v2 bundle — with the
 caveat that the product is `slate` **with this patch applied**, not upstream.
+
+## The lint gate
+
+`slate`'s CI runs `golangci-lint` as its last step, and at `c198ce0` that step
+**fails**: 28 unchecked-error findings in `cmd/slate`, `internal/discovery`,
+`internal/store` and `internal/export`. (It reports 16, because golangci-lint
+caps identical findings at three by default; `--max-same-issues=0` shows all 28.
+Which is why a patch that fixed only the reported 16 would leave the gate red
+and looking correct.)
+
+None of them is v2 work. They are folded in because a patch whose CI is red
+cannot show that its own tests ran under CI, and because the reader of a
+"verified" table deserves to know which steps actually pass. `golangci-lint`
+v2.15.0 with default linters, after the patch: **0 issues**.
+
+| Finding | Sites | Fix |
+|---|---|---|
+| `defer f.Close()` on a file only read | 2 in `store.go` | discarded in a closure — a read-only close error tells the caller nothing |
+| `defer conn.Close()` on a UDP socket | 2 in `discovery.go` | discarded; the socket dies with the process |
+| `defer ev.Close()` in a CLI command | 14 in `main.go` | discarded; `Store.Close` already discards its own `Sync` error, so there is nothing to propagate |
+| `defer resp.Body.Close()` | 1 in `main.go` | discarded; the body is read to completion before the defer runs |
+| SSE `fmt.Fprint` / `Fprintf` | 3 in `main.go` | **checked**, and the handler returns — a failed write means the client is gone, so the loop should stop rather than tick on |
+| `fmt.Fprintf` into a `sha256.Hash` | 1 in `main.go` | discarded as `_, _ =`; `hash.Hash.Write` documents a nil error |
+| `os.Remove` of the temp head | 1 in `head.go` | discarded; whether the rename succeeded is the result that matters |
+| `tmp.Close()` after a failed write or sync | 2 in `head.go` | discarded; the write error is the one being returned |
+| `f.Close()` in a test helper | 1 in `head_test.go` | `t.Fatalf` |
+| `defer f.Close()` in `WriteNDJSON` | 1 in `export.go` | promoted to the return value through a named result — a close failure can mean the last record never landed, and that file is the evidence |
+
+The one finding the patch itself introduced — `QF1012` on a
+`WriteString(fmt.Sprintf(...))` in `Preimage` — is fixed with
+`strconv.FormatUint`.
 
 ## Tests that run in slate's CI
 

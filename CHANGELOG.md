@@ -20,7 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   vectors: `internal/bundle/testdata/` holds the six v2 fixtures and their pins,
   and `vectors_test.go` walks §4.7 as a reader, so slate's own CI now checks the
   format against bundles written by two other encoders — and fails at inclusion,
-  signature or scope when the leaf rule, the fold or the preimage drifts.
+  signature or scope when the leaf rule, the fold or the preimage drifts. It also
+  fixes the 28 unchecked `Close`/write errors that left `slate`'s `golangci-lint`
+  step red at its own v1.5.0 release (reported as 16 until the linter's
+  identical-finding cap is lifted), so every step in `slate`'s CI passes after
+  `git apply`: `gofmt -l`, `go build`, `go vet`, `go test ./...`, and
+  `golangci-lint run` at 0 issues.
 - `core/bundle/` and `mnr bundle keygen` / `mnr bundle export` — the producer and
   signer for `witness-bundle/2`, which until now existed as a schema and a
   verifier only. A BLAKE3 Merkle tree with leaf-first audit paths, the §4.3
