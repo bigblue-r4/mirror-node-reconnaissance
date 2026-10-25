@@ -140,7 +140,7 @@ BLAKE3 and Ed25519 included — so it shares nothing with the Go encoders.
 | Unsigned v1 bundle | `UNAUTHENTICATED`, exit 3 — never `VERIFIED` |
 | `witness-bundle/2`, `scope=case` / `scope=log` / 7-leaf | `VERIFIED` — 4,301 / 5,895 / 3,560 B |
 | One bundle per log size 1…8 | All `VERIFIED`, with audit paths of 0–3 hashes |
-| Forged-but-signed bundles (11 controls) | Each rejected at the step that should catch it |
+| Forged-but-signed bundles, 10 controls | Each rejected at the step that should catch it — `inclusion`, `proofs`, `scope`, `head`, `preimage` — with two signed controls that are honest verifying |
 
 ```bash
 python3 -m unittest discover -s tools/bundle-verify     # 47 tests

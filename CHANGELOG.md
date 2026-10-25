@@ -27,8 +27,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   byte-level rule that verifies bundles already issued under the old format
   without re-signing them. Records six defects in the current format, each with
   the code that shows it, and the rehearsed evidence: bundles from both
-  repositories verified by one verifier, and eleven tamper controls failing
-  closed. Documentation only; the format is proposed, not implemented.
+  repositories verified by one verifier, and ten forged-but-signed controls each
+  failing at the step that catches it. Documentation only; the format is proposed, not implemented.
 - `tools/bundle-verify/` — an independent verifier for `witness-bundle/2` and
   for legacy v1 bundles, in Python with the standard library only, written from
   the schema rather than from the Go producers. BLAKE3 and Ed25519 are
