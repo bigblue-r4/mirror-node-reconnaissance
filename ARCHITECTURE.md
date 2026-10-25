@@ -40,10 +40,16 @@ Data flow per observed message, as implemented:
 3. The **Proposer** role is called with its system prompt and a `StepContext`
    (message, prior drift, echo flag); the raw answer is witnessed as a
    `model-turn` entry.
-4. The **Verifier** role is called with its own system prompt and the *same*
-   `StepContext` — not the Proposer's answer — and its `drift` field becomes the
-   authoritative score, clamped to `0..1`. Its turn is witnessed the same way.
-   Non-JSON output holds the previous drift. An attributed echo also holds drift.
+4. The **Verifier** role is called with its own system prompt and a
+   `VerifierContext`: the same step state plus the Proposer's parsed
+   `ProposerView` (`self_drift`, `stance`, `dialect`, `topology_hint`,
+   `telemetry`) as data to audit. Its `drift` field — never the Proposer's
+   `self_drift` — becomes the authoritative score, clamped to `0..1`, and its
+   `agree` flag reports whether the Proposer's claim matched its own reading.
+   Its turn is witnessed the same way; because the Verifier's prompt contains
+   the Proposer's view, that fingerprint covers the linkage between the two
+   turns, not just each turn on its own. Non-JSON output holds the previous
+   drift and claims no agreement. An attributed echo also holds drift.
 5. If drift ≥ `drift_threshold`, the step reports an alarm.
 6. The CLI checks the reaper's TTL between steps and again before any emission.
 7. On a trip, the CLI disconnects the mock connector, then `execute_teardown`
@@ -57,25 +63,31 @@ separated:
 
 - **Roles.** `Role::Proposer` and `Role::Verifier` get different system prompts
   and are called independently.
-- **Task framing.** The Verifier is instructed to treat the Proposer's output as
-  *data to audit*, not as a conclusion to accept.
+- **Task framing.** The Verifier is prompted to treat the Proposer's output as
+  *data to audit*, and its context presents that output as an unverified claim
+  (`VerifierContext { step, proposer }`) rather than as a conclusion.
 - **Budget.** Both roles draw from a single `AtomicUsize` call budget
   (`MeteredEngine`), so a two-role run cannot exceed the ceiling a single-role
   run would have.
 
 Three limits are worth stating plainly, because they are easy to assume away:
 
-- **The Verifier is not given the Proposer's answer.** `run_role` passes the same
-  `StepContext` to both roles, and that struct carries the message, the prior
-  drift and the echo flag. The audit instruction is in the prompt; the artifact
-  to be audited is not. So the second role re-characterizes the message rather
-  than checking the first role's characterization.
+- **The Verifier's claim to audit is real, but thin.** `step` builds a
+  `VerifierContext` from the step plus the Proposer's parsed view (or the
+  documented fallback view when the answer was unparseable), so `agree` is a
+  verdict on three fields — `self_drift` within tolerance, `stance` matching the
+  Verifier's own drift reading, and the `dialect` it was told matching the
+  message — not an evaluation of whether the characterization is *useful*. The
+  `topology_hint` and `telemetry` are passed along but never checked.
 - **Under `MockEngine`, both roles compute the same number.** Drift is arithmetic
   over eight literal marker substrings (`+0.16` per lure-bearing message, `-0.03`
   per benign one, clamped). The Proposer reports it as `self_drift`; the Verifier
-  reports it as `drift`; the Verifier's `agree` flag is simply `!lure`. The alarm
-  is the Verifier's value crossing the threshold, so **disagreement between roles
-  is not currently the signal**, despite the framing above.
+  recomputes it from the message, then checks the Proposer against that value.
+  An honest mock Proposer therefore always agrees, and disagreement is only
+  observable with a Proposer that misreports — which is exactly what
+  `a_downplaying_proposer_is_caught_by_the_verifier` injects. The alarm remains
+  the Verifier's drift crossing the threshold; `agree == false` is recorded and
+  surfaced but does not itself trip the node.
 - **Nothing here is evaluated.** There is no false-positive rate, no adversarial
   model that knows it is observed, and no comparison against a single-role
   baseline. The drift score is a demonstration of the plumbing.
@@ -155,7 +167,7 @@ fields is a hard error.
 
 ## 6. Testing
 
-`cargo test --workspace` runs 36 tests. They are deterministic: `MockEngine` plus
+`cargo test --workspace` runs 47 tests. They are deterministic: `MockEngine` plus
 a seeded `MockSwarm`, no backend and no network.
 
 - **ledger (13)** — append/verify round-trip, empty log, mutation detection,
@@ -163,8 +175,10 @@ a seeded `MockSwarm`, no backend and no network.
   create-once and idempotence, refusal to reopen a sealed log, deleted-anchor
   reporting, validated entry reading, `kind` preimage constraints, epoch-nonce
   fingerprints, ISO timestamps.
-- **observer (4)** — benign traffic stays below threshold, sustained lures trip
-  the alarm, the shared budget is capped, every step is witnessed.
+- **observer (7)** — benign traffic stays below threshold, sustained lures trip
+  the alarm, the shared budget is capped, every step is witnessed, the Verifier's
+  prompt carries the Proposer's claim, a downplaying Proposer is rejected while
+  its `self_drift` is discarded, and benign traffic is audited as consistent.
 - **reaper (3)** — TTL expiry, teardown seals and wipes, secret wipe.
 - **sim (3)** — determinism per seed, exact message count, rising lure pressure.
 - **CLI unit (13)** — config validation, friction CLI overrides, and the sparkle
@@ -180,6 +194,13 @@ CI (`.github/workflows/ci.yml`, stable Rust) runs `cargo fmt --all --check`,
 `cargo build --workspace --all-targets`, `cargo test --workspace` and
 `cargo clippy --workspace --all-targets -- -D warnings`. It does not pass
 `--locked`, so a stale `Cargo.lock` would be updated silently in CI.
+
+A second job, `aggregation`, runs `scripts/ci/sparkle-tamper.sh` against a real
+binary: it runs a sparkle aggregation, asserts the untouched result verifies,
+alters one byte of a probe ledger's first entry, and asserts verification now
+exits 1 and names that probe. It checks the exit codes and the reported reason,
+not just that the command failed, so a verification that failed for an unrelated
+reason (a parse error, a missing directory) would not satisfy it.
 
 ## 7. Request emission (lab only)
 

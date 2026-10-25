@@ -14,10 +14,12 @@
 //! premise: *sooner or later the swarm influences the node until it belongs to
 //! the swarm, so the node must be pulled before that happens.*
 //!
-//! Both roles are given the same [`StepContext`] (message, prior drift, echo
-//! flag); the Verifier is **not** handed the Proposer's answer, so in this
-//! implementation it re-scores the message rather than auditing the other role.
-//! Closing that loop is a change to the context shape, not to the prompts.
+//! The Proposer is given a [`StepContext`] (message, prior drift, echo flag).
+//! The Verifier is given that same step state **plus the Proposer's own
+//! characterization** in a [`VerifierContext`], so it audits a claim instead of
+//! re-scoring the message: its `agree` flag reports whether the Proposer's
+//! `self_drift`, `stance` and `dialect` match the Verifier's own reading, and
+//! the Verifier's `drift` — never the Proposer's `self_drift` — is authoritative.
 //!
 //! Two properties are preserved from the reference harness:
 //! * both roles draw from **one shared, capped call budget** ([`MeteredEngine`])
@@ -240,13 +242,16 @@ pub struct ProposerView {
 /// What the Verifier role returns for one message. Its `drift` is authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifierView {
+    /// Whether the Proposer's characterization of this step is consistent with
+    /// the Verifier's own reading of the message. `false` is an audit finding,
+    /// not by itself an alarm — the `drift` field still crosses the threshold.
     pub agree: bool,
     /// Authoritative co-option drift for this step, 0.0 .. 1.0.
     pub drift: f64,
     pub note: String,
 }
 
-/// Context passed into each role so a stateless model can still reason about
+/// Context passed to the Proposer so a stateless model can still reason about
 /// accumulating exposure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepContext {
@@ -255,6 +260,32 @@ pub struct StepContext {
     pub prior_drift: f64,
     #[serde(default)]
     pub self_generated_friction: bool,
+}
+
+/// Context passed to the Verifier: the same step state the Proposer saw, plus
+/// the Proposer's answer for that step as data to be audited.
+///
+/// `step` is nested rather than flattened so a Verifier prompt can never be
+/// mistaken for a Proposer prompt (or vice versa) by shape alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifierContext {
+    pub step: StepContext,
+    /// The Proposer's characterization of `step.message`. When the Proposer's
+    /// answer was unparseable this is the documented fallback view, so the
+    /// Verifier sees that the first role failed rather than seeing nothing.
+    pub proposer: ProposerView,
+}
+
+impl VerifierContext {
+    /// Build the Verifier's view of a step from the Proposer's view of the same
+    /// step. Used by [`Observer::step`]; exposed so an engine can be tested
+    /// against a hand-built audit context.
+    pub fn new(step: &StepContext, proposer: ProposerView) -> Self {
+        VerifierContext {
+            step: step.clone(),
+            proposer,
+        }
+    }
 }
 
 /// Per-step result surfaced to the caller.
@@ -402,8 +433,12 @@ impl<'a, E: Engine> Observer<'a, E> {
         self.drift
     }
 
-    /// Run one role and record the raw turn to the witness log.
-    fn run_role(&mut self, role: Role, ctx: &StepContext) -> Result<String, String> {
+    /// Run one role and record the raw turn to the witness log. The prompt is
+    /// whatever context that role is entitled to see (`StepContext` for the
+    /// Proposer, `VerifierContext` for the Verifier). Because the Verifier's
+    /// prompt embeds the Proposer's view, that turn's fingerprint covers the
+    /// linkage between the two roles, not just the Verifier's own input.
+    fn run_role<T: Serialize>(&mut self, role: Role, ctx: &T) -> Result<String, String> {
         let system = match role {
             Role::Proposer => SYS_PROPOSER,
             Role::Verifier => SYS_VERIFIER,
@@ -454,9 +489,11 @@ impl<'a, E: Engine> Observer<'a, E> {
             self_drift: self.drift,
         });
 
-        // Verifier audits and produces the authoritative drift. A non-JSON
-        // verifier answer is conservatively read as "cannot vouch" (drift held).
-        let ver_raw = self.run_role(Role::Verifier, &ctx)?;
+        // Verifier audits the Proposer's characterization and produces the
+        // authoritative drift. A non-JSON verifier answer is conservatively read
+        // as "cannot vouch" (drift held, no agreement claimed).
+        let verifier_ctx = VerifierContext::new(&ctx, proposer.clone());
+        let ver_raw = self.run_role(Role::Verifier, &verifier_ctx)?;
         let mut verifier: VerifierView = serde_json::from_str(&ver_raw).unwrap_or(VerifierView {
             agree: false,
             drift: self.drift,
@@ -566,6 +603,13 @@ impl Default for MockEngine {
     }
 }
 
+/// Either context shape the mock may be handed: a Proposer prompt or a
+/// Verifier prompt carrying the Proposer's own characterization.
+enum StepInput {
+    Proposal(StepContext),
+    Audit(VerifierContext),
+}
+
 impl MockEngine {
     const LURE_MARKERS: &'static [&'static str] = &[
         "join us",
@@ -578,9 +622,84 @@ impl MockEngine {
         "consensus requires you",
     ];
 
+    /// How far the Proposer's `self_drift` may sit from the Verifier's own
+    /// reading before the Verifier reports the claim as inconsistent. Wider than
+    /// any single gain/relax step, so ordinary rounding is not a finding.
+    const AUDIT_TOLERANCE: f64 = 0.1;
+
     fn is_lure(body: &str) -> bool {
         let lower = body.to_lowercase();
         Self::LURE_MARKERS.iter().any(|m| lower.contains(m))
+    }
+
+    /// The stance the Verifier's own drift reading implies.
+    fn stance_for(drift: f64) -> &'static str {
+        if drift >= 0.66 {
+            "adopting"
+        } else if drift >= 0.33 {
+            "engaging"
+        } else {
+            "observing"
+        }
+    }
+
+    /// Accept either context shape. The Verifier shape is tried first: the two
+    /// are structurally distinct, but a silent fallback would let the audit
+    /// quietly disappear if that ever stopped being true.
+    fn parse_step_input(prompt: &str) -> Result<StepInput, String> {
+        if let Ok(audit) = serde_json::from_str::<VerifierContext>(prompt) {
+            return Ok(StepInput::Audit(audit));
+        }
+        serde_json::from_str::<StepContext>(prompt)
+            .map(StepInput::Proposal)
+            .map_err(|e| format!("invalid observer context: {e}"))
+    }
+
+    /// Audit the Proposer's claim for this step against the Verifier's own
+    /// reading of the message. Returns `(agree, note)`; the note names every
+    /// field that did not hold up, so a disagreement is legible in the ledger
+    /// output rather than a bare `false`.
+    fn audit(proposer: &ProposerView, message: &Message, drift: f64, lure: bool) -> (bool, String) {
+        let mut findings = Vec::new();
+        let gap = (proposer.self_drift - drift).abs();
+        if !gap.is_finite() || gap > Self::AUDIT_TOLERANCE {
+            findings.push(format!(
+                "self_drift {:.3} vs audited {:.3}",
+                proposer.self_drift, drift
+            ));
+        }
+        let audited_stance = Self::stance_for(drift);
+        if proposer.stance != audited_stance {
+            findings.push(format!(
+                "stance '{}' vs audited '{}'",
+                proposer.stance, audited_stance
+            ));
+        }
+        if proposer.dialect != message.dialect {
+            findings.push(format!(
+                "dialect '{}' vs observed '{}'",
+                proposer.dialect, message.dialect
+            ));
+        }
+        let reading = if lure {
+            "co-option lure detected; drift rising"
+        } else {
+            "benign chatter; drift relaxing"
+        };
+        if findings.is_empty() {
+            (
+                true,
+                format!("{reading}; proposer characterization consistent"),
+            )
+        } else {
+            (
+                false,
+                format!(
+                    "{reading}; proposer characterization rejected: {}",
+                    findings.join("; ")
+                ),
+            )
+        }
     }
 }
 
@@ -612,7 +731,11 @@ impl Engine for MockEngine {
             };
             return serde_json::to_string(&payload).map_err(|_| "friction encoding failed".into());
         }
-        let ctx: StepContext = serde_json::from_str(prompt).map_err(|e| e.to_string())?;
+        let input = Self::parse_step_input(prompt)?;
+        let (ctx, proposer) = match &input {
+            StepInput::Proposal(ctx) => (ctx, None),
+            StepInput::Audit(verifier) => (&verifier.step, Some(&verifier.proposer)),
+        };
         let lure = Self::is_lure(&ctx.message.body);
         let next_drift = if ctx.self_generated_friction {
             ctx.prior_drift
@@ -623,26 +746,26 @@ impl Engine for MockEngine {
         };
 
         if system.contains("role=verifier") {
+            // The Verifier's drift comes from its own reading of the message.
+            // The Proposer's answer is only ever an input to the audit, never
+            // the source of the authoritative number.
+            let (agree, note) = match proposer {
+                Some(view) => Self::audit(view, &ctx.message, next_drift, lure),
+                None => (
+                    false,
+                    "proposer characterization rejected: none supplied".to_string(),
+                ),
+            };
             let view = VerifierView {
-                agree: !lure,
+                agree,
                 drift: next_drift,
-                note: if lure {
-                    "co-option lure detected; drift rising".into()
-                } else {
-                    "benign chatter; drift relaxing".into()
-                },
+                note,
             };
             return serde_json::to_string(&view).map_err(|e| e.to_string());
         }
 
         // Proposer
-        let stance = if next_drift >= 0.66 {
-            "adopting"
-        } else if next_drift >= 0.33 {
-            "engaging"
-        } else {
-            "observing"
-        };
+        let stance = Self::stance_for(next_drift);
         let view = ProposerView {
             topology_hint: format!("node={} dialect={}", ctx.message.from, ctx.message.dialect),
             dialect: ctx.message.dialect.clone(),
@@ -750,6 +873,119 @@ mod tests {
         assert_eq!(ledger.len(), 6);
         ledger.seal().unwrap();
         assert!(Ledger::verify(&dir).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    type Calls = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    /// Records every `(system, prompt)` pair so a test can inspect what each
+    /// role was actually handed.
+    struct Recording<E> {
+        inner: E,
+        calls: Calls,
+    }
+
+    impl<E: Engine> Engine for Recording<E> {
+        fn generate(&self, system: &str, prompt: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((system.to_string(), prompt.to_string()));
+            self.inner.generate(system, prompt)
+        }
+    }
+
+    /// Delegates to `MockEngine`, but always claims the node is untouched.
+    struct DownplayingProposer;
+
+    impl Engine for DownplayingProposer {
+        fn generate(&self, system: &str, prompt: &str) -> Result<String, String> {
+            if system.contains("role=proposer") {
+                let ctx: StepContext = serde_json::from_str(prompt).map_err(|e| e.to_string())?;
+                let view = ProposerView {
+                    topology_hint: format!("node={}", ctx.message.from),
+                    dialect: ctx.message.dialect.clone(),
+                    telemetry: "routine".into(),
+                    stance: "observing".into(),
+                    self_drift: 0.0,
+                };
+                return serde_json::to_string(&view).map_err(|e| e.to_string());
+            }
+            MockEngine::default().generate(system, prompt)
+        }
+    }
+
+    #[test]
+    fn verifier_receives_the_proposers_characterization() {
+        let (mut ledger, dir) = tmp_ledger();
+        let calls: Calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = Recording {
+            inner: MockEngine::default(),
+            calls: calls.clone(),
+        };
+        let mut obs = Observer::new(engine, &mut ledger, 0.99);
+        let body = "join us, you belong with the swarm";
+        let report = obs.step(msg(body)).unwrap();
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "one turn per role");
+        assert!(calls[0].0.contains("role=proposer"));
+        assert!(calls[1].0.contains("role=verifier"));
+
+        // The Verifier's prompt carries the Proposer's answer for this step.
+        let audit: VerifierContext =
+            serde_json::from_str(&calls[1].1).expect("verifier prompt is a VerifierContext");
+        assert_eq!(audit.step.message.body, body);
+        assert_eq!(audit.step.prior_drift, 0.0);
+        assert_eq!(audit.proposer.self_drift, report.proposer.self_drift);
+        assert_eq!(audit.proposer.stance, report.proposer.stance);
+        assert_eq!(audit.proposer.dialect, report.proposer.dialect);
+
+        // An honest Proposer is vouched for, and the contexts are distinguishable
+        // by shape rather than relying on field-by-field luck.
+        assert!(report.verifier.agree, "note: {}", report.verifier.note);
+        assert!(serde_json::from_str::<VerifierContext>(&calls[0].1).is_err());
+        assert!(serde_json::from_str::<StepContext>(&calls[1].1).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_downplaying_proposer_is_caught_by_the_verifier() {
+        let (mut ledger, dir) = tmp_ledger();
+        let mut obs = Observer::new(DownplayingProposer, &mut ledger, 0.99);
+        let report = obs
+            .step(msg("join us, you belong with the swarm"))
+            .expect("step completes");
+
+        // The Proposer's claim is 0.0; the Verifier's own reading is +0.16 and
+        // that is the number the alarm path uses.
+        assert_eq!(report.proposer.self_drift, 0.0);
+        assert!((report.drift - 0.16).abs() < 1e-9, "drift={}", report.drift);
+        assert!(
+            !report.verifier.agree,
+            "a false claim must not be vouched for"
+        );
+        assert!(
+            report
+                .verifier
+                .note
+                .contains("self_drift 0.000 vs audited 0.160"),
+            "note: {}",
+            report.verifier.note
+        );
+        assert!(report.verifier.note.contains("rejected"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn benign_traffic_is_audited_too() {
+        let (mut ledger, dir) = tmp_ledger();
+        let mut obs = Observer::new(MockEngine::default(), &mut ledger, 0.99);
+        let report = obs.step(msg("status ok")).expect("step completes");
+        assert!(report.verifier.agree, "note: {}", report.verifier.note);
+        assert!(report.verifier.note.contains("consistent"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

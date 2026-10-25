@@ -52,11 +52,13 @@ Stated explicitly, because each of these is easy to assume from the names:
 
 - **Drift scoring is not validated detection.** Under the shipped `MockEngine`,
   drift is arithmetic over eight literal marker substrings (`+0.16` per lure,
-  `-0.03` per benign message, clamped). The Verifier role is not given the
-  Proposer's answer, so the two roles re-score the same message rather than
-  checking each other, and under the mock both produce the same value. There is
-  no measured false-positive rate and no evaluation against an adversary that
-  adapts. A real model would produce an unmeasured score.
+  `-0.03` per benign message, clamped). The Verifier does receive the Proposer's
+  claim and reports `agree = false` when its `self_drift`, `stance` or `dialect`
+  contradict its own reading, but both roles derive drift from the same markers,
+  so under the mock an honest Proposer is always agreed with and disagreement
+  only appears if it is deliberately made to lie. There is no measured
+  false-positive rate and no evaluation against an adversary that adapts. A real
+  model would produce an unmeasured score.
 - **TTL bounding is only as good as the loop that checks it.** The reaper is
   polled by the CLI between steps; `Observer::run` does not consult it. A slow or
   blocked model call is not interrupted.
@@ -74,6 +76,11 @@ Stated explicitly, because each of these is easy to assume from the names:
 - **Timestamps are self-reported.** `iso_now()` falls back to the Unix epoch if
   the clock read fails, so a log can contain `1970-01-01T00:00:00Z` entries
   without any error.
+- **Only the friction variables fail closed.** A malformed `MNR_FRICTION_BUDGET`,
+  `MNR_FRICTION_THRESHOLD` or `MNR_INJECT_FRICTION` is rejected, but a malformed
+  `MNR_TTL_SECONDS` — or any other non-friction `MNR_*` value — is silently
+  ignored in favour of the file or the default. A typo shortens containment
+  without warning.
 
 ## 5. Dual-use risk created by MNR
 

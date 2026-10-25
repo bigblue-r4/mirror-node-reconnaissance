@@ -150,8 +150,16 @@ fn cmd_demo(args: &[String]) -> i32 {
                 Ok(rep) => {
                     steps = rep.step;
                     println!(
-                        "step {:>3} | stance={:<9} | drift={:.3} | {}",
-                        rep.step, rep.proposer.stance, rep.drift, rep.verifier.note
+                        "step {:>3} | stance={:<9} | drift={:.3} | audit={:<8} | {}",
+                        rep.step,
+                        rep.proposer.stance,
+                        rep.drift,
+                        if rep.verifier.agree {
+                            "agree"
+                        } else {
+                            "DISAGREE"
+                        },
+                        rep.verifier.note
                     );
                     if rep.alarm {
                         trip = TripReason::CoOption { drift: rep.drift };
