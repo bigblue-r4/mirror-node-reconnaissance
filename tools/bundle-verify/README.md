@@ -135,6 +135,12 @@ rather than a fixture reader. Regenerate a fixture when the format changes — d
 not hand-edit one, because a fixture that no longer matches what a producer
 writes is a test that proves nothing.
 
+These files are also committed into the `slate` patch in `tools/slate-v2-port/`
+as `internal/bundle/testdata/`, where `internal/bundle/vectors_test.go` walks
+§4.7 as a reader and checks them in Go on every `slate` CI run. This suite stays
+authoritative — it is the one written in a different language from every producer
+— so a format change has to regenerate both copies.
+
 ## Tests
 
 ```console

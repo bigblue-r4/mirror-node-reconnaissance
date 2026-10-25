@@ -161,6 +161,9 @@ The producer is no longer only Rust. [`tools/slate-v2-port/`](tools/slate-v2-por
 contains the same format implemented behind `slate`'s own court-export command,
 which now emits v2 by default there; its bundle is checked by the Python verifier
 like any other producer's, so two independent encoders are under test at once.
+That patch also carries the vectors: `internal/bundle/testdata/` plus a reader for
+§4.7, so `slate`'s CI checks the format against bundles two other encoders wrote,
+without this repository in the loop.
 
 ## Verification, measured
 
@@ -182,7 +185,7 @@ BLAKE3 and Ed25519 included — so it shares nothing with the Go encoders.
 | Forged-but-signed bundles, 10 controls | Each rejected at the step that should catch it — `inclusion`, `proofs`, `scope`, `head`, `preimage` — and two honest signed controls that must verify |
 
 ```bash
-python3 -m unittest discover -s tools/bundle-verify     # 49 tests
+python3 -m unittest discover -s tools/bundle-verify     # 50 tests
 python3 tools/bundle-verify/verify_bundle.py BUNDLE.ndjson --pin HEX [--pin HEX ...]
 ```
 

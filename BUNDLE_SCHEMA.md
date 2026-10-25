@@ -391,7 +391,7 @@ about is not a schema:
 
 Then the same claims from outside Go. `tools/bundle-verify/` is a Python
 verifier written from §4.3 and §6.1 — standard library only, no shared code with
-the producers — with the bundles kept as frozen vectors and 49 tests. Sizes are
+the producers — with the bundles kept as frozen vectors and 50 tests. Sizes are
 the committed fixtures; they differ from the runs above by a byte or two because
 `generated_at` and the bundle id are per-run.
 
@@ -487,7 +487,11 @@ Consumers:
   `tools/bundle-verify/testdata/v2-slate.ndjson`, the first v2 bundle written by
   a product's own export path. Its package is deliberately self-contained
   (`internal/store` plus BLAKE3) so that it can move into the module below
-  unchanged; until then a released `slate` still writes v1.
+  unchanged; until then a released `slate` still writes v1. The same patch
+  carries the §6.2 vectors into `internal/bundle/testdata/` with a `_test.go`
+  reader for §4.7, so `slate`'s CI checks the format against bundles two other
+  encoders wrote — the check stops depending on this repository being in the
+  loop.
 - **`kiss-protocol`** keeps `cmd/witness` and `store.Export`/`VerifyExport`;
   `internal/pd/export` is deleted with the `witness-pd` retirement (P0-3's second
   half).
@@ -626,7 +630,7 @@ go test ./internal/pd/export/ -run TestP03V2Prototype -v
 
 # independent verifier: Python 3.12, standard library only, from the spec
 python3 -m unittest discover -s tools/bundle-verify
-  Ran 49 tests  OK
+  Ran 50 tests  OK
 
 python3 tools/bundle-verify/verify_bundle.py testdata/v1-kiss.ndjson --pin …
   VERIFIED               904 B, kiss-issued

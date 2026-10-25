@@ -614,10 +614,10 @@ index ad4f0ef..7092d7d 100644
 +lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
 diff --git a/internal/bundle/bundle.go b/internal/bundle/bundle.go
 new file mode 100644
-index 0000000..562c1b1
+index 0000000..cc47950
 --- /dev/null
 +++ b/internal/bundle/bundle.go
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,402 @@
 +// Package bundle writes witness-bundle/2 court exports.
 +//
 +// The format is specified in mirror-node-reconnaissance's BUNDLE_SCHEMA.md §4:
@@ -648,6 +648,7 @@ index 0000000..562c1b1
 +	"fmt"
 +	"os"
 +	"path/filepath"
++	"strconv"
 +	"strings"
 +	"time"
 +
@@ -971,7 +972,7 @@ index 0000000..562c1b1
 +		out.WriteByte('\n')
 +	}
 +	out.WriteString("log_head.size=")
-+	out.WriteString(fmt.Sprintf("%d", b.LogHead.Size))
++	out.WriteString(strconv.FormatUint(b.LogHead.Size, 10))
 +	out.WriteByte('\n')
 +	for _, field := range []struct {
 +		name  string
@@ -1479,6 +1480,1221 @@ index 0000000..7bbd369
 +	}
 +	collectPath(n.right, index-n.left.count, path)
 +	*path = append(*path, n.left.hash)
++}
+diff --git a/internal/bundle/testdata/README.md b/internal/bundle/testdata/README.md
+new file mode 100644
+index 0000000..0915d86
+--- /dev/null
++++ b/internal/bundle/testdata/README.md
+@@ -0,0 +1,24 @@
++# `witness-bundle/2` test vectors
++
++These are the same frozen vectors as `tools/bundle-verify/testdata/` in
++mirror-node-reconnaissance, copied here so slate's own CI verifies the format
++rather than trusting a repository that is not in the loop.
++
++| File | Producer | Exercises |
++|---|---|---|
++| `v2-case.ndjson` | scratch Go emitter, §4 alone | `scope=case`, 4 of 500 entries, 9-hash audit paths |
++| `v2-log.ndjson` | scratch Go emitter, §4 alone | `scope=log`, all 12 entries, `entry_count == log_head.size` |
++| `v2-seven.ndjson` | scratch Go emitter, §4 alone | a 4+3 split whose right subtree splits again; 3-hash paths |
++| `v2-rust-log.ndjson` | `mnr bundle export` (Rust, `core/bundle`) | the same 12 entry lines as `v2-log.ndjson` |
++| `v2-rust-case.ndjson` | `mnr bundle export` (Rust, `core/bundle`) | 3 of 7 entries at seqs 2, 5, 7; indices 1, 4, 6 |
++| `v2-slate.ndjson` | `slate export` with this patch | 2 of 4 entries from a real store, distinct node and export keys |
++
++Each `*.export.pub` / `*.node.pub` is the public half of the key that signed the
++header or the tree head. A bundle is only ever checked against those pins, never
++against the key it names for itself — otherwise the document would vouch for its
++own signature.
++
++The private halves were throwaway and are gone; the records are fictional.
++
++Regenerate a fixture when the format changes. Do not hand-edit one: a fixture
++that no longer matches what a producer writes is a test that proves nothing.
+diff --git a/internal/bundle/testdata/v2-case.export.pub b/internal/bundle/testdata/v2-case.export.pub
+new file mode 100644
+index 0000000..826019a
+--- /dev/null
++++ b/internal/bundle/testdata/v2-case.export.pub
+@@ -0,0 +1 @@
++78e37a81fa6d38982db266d7b866c7a6b4d479b7dc2bf3cb7e6e709cd84300a4
+diff --git a/internal/bundle/testdata/v2-case.ndjson b/internal/bundle/testdata/v2-case.ndjson
+new file mode 100644
+index 0000000..28218d6
+--- /dev/null
++++ b/internal/bundle/testdata/v2-case.ndjson
+@@ -0,0 +1,5 @@
++{"format":"witness-bundle/2","bundle_id":"BUNDLE-20260512-4e1a7c02","generated_at":"2026-05-12T14:30:00Z","scope":"case","case_number":"CASE-A","department":"Honolulu PD","agency":"Honolulu Police Department","seal":"HPD-2026","node_id":"node-001","entry_count":4,"sha256_chain":"e73d3d468fde41b9f693de89e34063fb8f03e80f56d447338988de030b1a3c21","export_actor":"Sgt. Example","export_role":"evidence_clerk","signed_by":"78e37a81fa6d38982db266d7b866c7a6b4d479b7dc2bf3cb7e6e709cd84300a4","log_head":{"size":500,"root":"3b7aad9e7f71e3f6dba38d15366146ea83c43a6009c43200e12a4c693262cd2f","ts":"2026-10-25T17:01:23Z","sig":"c745b825bb9a531258ad40226d4594f219685f494e871ed532bf4c5c40c866d3ecd72fc9ee5baff6d3264871c61f259edcd5db01992a4a8c370213b6cc240808","signer_key":"c225f89837ee6c70897ce64ff5d7966648bfd03ec33acb24434d7a2ad3ab7554"},"proofs":[{"seq":1,"index":0,"size":500,"path":["d04e0c15821724171cbae12c5217dfd226fe53392c4edb1babb4f9777ded5490","1348805af8378b2bc1f185c154f3274497d62cd9be2e2fed84706ad4a85de0dd","e4325c761fbc3e61253fe174e5d3851241089989a67415a68cc224de7bed4c28","5d2bf7dfc22e83fb9be8796306577b4b0c527dd64084bfabbc0d9589f17930e8","cfc4efb4d1a4119ba6e2d9a43153c8b7dd04ed1f20297f3448097015400ea8dc","4a93b1c6e19082aa4ab15e8bb1446ce900d297b827d53a88152682cae9239f4a","a4b51386c9b0af8b263ebc0e2cf7d1571295a34ea4db4636dd5b9ef4b32a3859","18bfeedbc5269a915e44269129ddc91186fab7c6d061014ca2392bf357bb0d82","0963d223c7a5cdcbcfc696faff2991f3bcc038c68679612a07be72bda5e73d6b"]},{"seq":126,"index":125,"size":500,"path":["bd6acc986aa9381f6f1b330a1ad6e800835754e341a9a0e2bc944412ee3d96e7","06f27335045f64698000845735ef7307a9d48042ee9b4a17487f3154b4e987aa","6ce1aa7b42d2bc0338a486b541d13f7dd3a46b7624b067288e08d73a49d5082d","e5203eb5a5b18368305fa537b0a7237aa7057718c12d1f8d0c1240b57e3e64d1","85c274ac3d4c1fe54a506f380bc5529258ab9c4d5c1f61242f4d6ab2c4cc6138","6464b16651ade081fa13dd2319a9c346e905c5d003b2670ccc347e996df334f4","6d316b734360c14a00f83822e9b33016cac3d14951481be8814706144302e452","18bfeedbc5269a915e44269129ddc91186fab7c6d061014ca2392bf357bb0d82","0963d223c7a5cdcbcfc696faff2991f3bcc038c68679612a07be72bda5e73d6b"]},{"seq":251,"index":250,"size":500,"path":["c15a9679a783f4d6d03426b1325672b541cd181725da7de12dabdaeb0ac882a8","80ef19ada3204525d77f8d786d765424f3a62cd7d69ca2b3fd2e7d6a1e0c33b6","02511d847c9c78e76ded705fd2bef4eaea78a4c1f46c07436d6ea43fa71c0172","164c5dd8b9ded6235547671e8f4bfd15082633799223da8c7ce9d2337d58e2a8","24d1187e9abf727236eaf4087c6dcce516ee58371ff94dd25f2fe6b55790b7c7","9df473c2a7da24207f3c71118584e14a3b76f04efe60752a8f7c7141afd11711","1f8584f8735606fdb4cb408595f38ec6366644581eb1a83232897eba9e55f039","abedf9574bbf6db09e634cc77ff017418cd06dc8402501299565fb604aa66a33","0963d223c7a5cdcbcfc696faff2991f3bcc038c68679612a07be72bda5e73d6b"]},{"seq":376,"index":375,"size":500,"path":["80f489c9f1af93468278d769c5048be6226b1589c71ce059e7b26b7a294fdb7e","773c8b9e62699f7e4ec170f8756cd28b26d84ae7f20e303bef41aa2b2317177f","c212c750dffaf056257dded72139f8b39d7d39e70fb89cb5889f905196669577","60b65137eefe959d491f814bef39607326df0284210724413829075796ad440a","1859559ee1655d650b615f7febcdd13c64e0cc1171820003bb3883bc536a53f9","ae80bee38c1ab6f201d16d2af3360349a9d28e495a829bc5c116a1826f7fa301","14ccad9ba40b3d0393a181bbb3383bd8578c80f209122fd417ede823c7eefbfe","34c495f08955267b1bcccee956147d0fe38e0c5dd1dd1c108116928f9cd1e2c1","bddf968b498245ca1e6e9f5eace869df7d4ae2c1b29cf4146b0e4b057f1a0e50"]}],"signature":"18d3fa70ca75f1a988c85b8639efa0e50a8f7d622b3a96b0957c385ad296f21db1ef5cb7fc3f9dc1be5e4814491f860b9a8079e193e81d830484ed5f8567630b"}
++{"seq":1,"ts":"2026-10-25T17:01:22.595628778Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-A","item_id":"ITEM-000","notes":"sealed bag \u0026 tag"}}
++{"seq":126,"ts":"2026-10-25T17:01:22.635201115Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-A","item_id":"ITEM-125","notes":"sealed bag \u0026 tag"}}
++{"seq":251,"ts":"2026-10-25T17:01:22.92390701Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-A","item_id":"ITEM-250","notes":"sealed bag \u0026 tag"}}
++{"seq":376,"ts":"2026-10-25T17:01:22.985019607Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-A","item_id":"ITEM-375","notes":"sealed bag \u0026 tag"}}
+diff --git a/internal/bundle/testdata/v2-case.node.pub b/internal/bundle/testdata/v2-case.node.pub
+new file mode 100644
+index 0000000..291f5fa
+--- /dev/null
++++ b/internal/bundle/testdata/v2-case.node.pub
+@@ -0,0 +1 @@
++c225f89837ee6c70897ce64ff5d7966648bfd03ec33acb24434d7a2ad3ab7554
+diff --git a/internal/bundle/testdata/v2-log.export.pub b/internal/bundle/testdata/v2-log.export.pub
+new file mode 100644
+index 0000000..7398297
+--- /dev/null
++++ b/internal/bundle/testdata/v2-log.export.pub
+@@ -0,0 +1 @@
++78bcf824e2b79c8780b64fc2d82f861662813200016cdc6846b0403c2b69abe8
+diff --git a/internal/bundle/testdata/v2-log.ndjson b/internal/bundle/testdata/v2-log.ndjson
+new file mode 100644
+index 0000000..237f62b
+--- /dev/null
++++ b/internal/bundle/testdata/v2-log.ndjson
+@@ -0,0 +1,13 @@
++{"format":"witness-bundle/2","bundle_id":"BUNDLE-20260512-9d0c15be","generated_at":"2026-05-12T14:30:00Z","scope":"log","case_number":"","department":"SGAIL research","agency":"","seal":"","node_id":"farm-node-03","entry_count":12,"sha256_chain":"463a7076349da3f4207ac0dbcee2bbc81ba4928c8b529355d568403e6d8770f9","export_actor":"","export_role":"","signed_by":"78bcf824e2b79c8780b64fc2d82f861662813200016cdc6846b0403c2b69abe8","log_head":{"size":12,"root":"0b0250f72be82bdbd497e7f5654ea9bf59d33a4dcda1379ef42ccdf17122b199","ts":"2026-10-25T17:01:23Z","sig":"b1e0e7a5a75e9047e527162694b7601c15a6e9cc0432092300148912216f152e541a3d8c24e7b4f0cb3db4aef781d8f448c29a143f085a7c9b7a82e5c806d606","signer_key":"251f6339e1beaa14392d4e9fbd36e777f86f9f458655cf7da28bedc819b1b657"},"proofs":[{"seq":1,"index":0,"size":12,"path":["4b8c012f9a870814a475ba773f7566389a0003cde582a49ab3d551c9069e7f94","9dfb6b051801c015d2705380e1cba14cf553b7064fa48cb600530ba55a89bf75","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":2,"index":1,"size":12,"path":["c67b98cf34f74f165f2fc56bc8a9add62253030516f7dcb3da861f826b6e651e","9dfb6b051801c015d2705380e1cba14cf553b7064fa48cb600530ba55a89bf75","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":3,"index":2,"size":12,"path":["509f9fbefd7ac88532009c44a941cb716bf96e0c25b7e44f6c9f343dfc32b5da","d57f74b28e7d61bb295b1af19b5b9a94a7cecedf66122f189ce8ce5ae983dfc1","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":4,"index":3,"size":12,"path":["2a51a8967bcc9e48c8fd25b226a80924343289fdef76dfd4593a249f421e5a2f","d57f74b28e7d61bb295b1af19b5b9a94a7cecedf66122f189ce8ce5ae983dfc1","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":5,"index":4,"size":12,"path":["1ee1d9d93c3cd5e1304b9bd40335ddf718b639bcf215302ab51abc5cd88a4bb8","6e0ee2123650323ace8b68fdca921732360936a181b77ad97cb54157ad42288d","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":6,"index":5,"size":12,"path":["803cdcd2d6c713ce89df8ab58404bbcdabf2136eccdc30b89f5d498241efa2a0","6e0ee2123650323ace8b68fdca921732360936a181b77ad97cb54157ad42288d","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":7,"index":6,"size":12,"path":["d256af743020cc35a8a1550a281d314ca318c5d3e9c1906eb7eb533b1fa4068a","92ec8ca24da10946a73725058b99c9d9ea0b775ce3feecb59bb74989675067ce","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":8,"index":7,"size":12,"path":["00deb0e39b73d26a09b93b2cad905d3c7b551538969c4a61eb18da533c9025d7","92ec8ca24da10946a73725058b99c9d9ea0b775ce3feecb59bb74989675067ce","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":9,"index":8,"size":12,"path":["3c4837508004b2b236f5fc9d86fbbb763c388907d03e4632da94075d8dc8b2b2","17faf23fe3799b3c3c45879a8ef1c54e653027ecc25d3b195f54518874fdfe2d","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]},{"seq":10,"index":9,"size":12,"path":["84baa3a34b389a7c149a8bec7e0681f520b6dbedeeaab7616c56fddc020bd3b8","17faf23fe3799b3c3c45879a8ef1c54e653027ecc25d3b195f54518874fdfe2d","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]},{"seq":11,"index":10,"size":12,"path":["9256ec12bbb00777e12dd7c771e550c6a72e24eb9e80cb845c4f02eff8779814","1be46814ba5d8b255aa1e085c243403803cc261576631b4e7a5488984b28897c","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]},{"seq":12,"index":11,"size":12,"path":["04d9e8a2012643b87f4f5f593b084067b745a2ab3e06b83ff708e63e5a099e20","1be46814ba5d8b255aa1e085c243403803cc261576631b4e7a5488984b28897c","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]}],"signature":"da4c33978d83de89485b75db39a76af101c9a06815de5441d01345c672af839291bea4b40b51ed941dbff1f981bbbbb2f520ea51a6785a3e51dc5da1313a2f06"}
++{"seq":1,"ts":"2026-10-25T17:01:23.074476642Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-00"}}
++{"seq":2,"ts":"2026-10-25T17:01:23.074615322Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-01"}}
++{"seq":3,"ts":"2026-10-25T17:01:23.074826828Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-02"}}
++{"seq":4,"ts":"2026-10-25T17:01:23.07506261Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-03"}}
++{"seq":5,"ts":"2026-10-25T17:01:23.075273235Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-04"}}
++{"seq":6,"ts":"2026-10-25T17:01:23.075496564Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-05"}}
++{"seq":7,"ts":"2026-10-25T17:01:23.075703903Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-06"}}
++{"seq":8,"ts":"2026-10-25T17:01:23.075912233Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-07"}}
++{"seq":9,"ts":"2026-10-25T17:01:23.076122367Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-08"}}
++{"seq":10,"ts":"2026-10-25T17:01:23.076344424Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-09"}}
++{"seq":11,"ts":"2026-10-25T17:01:23.076557753Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-10"}}
++{"seq":12,"ts":"2026-10-25T17:01:23.076773287Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-11"}}
+diff --git a/internal/bundle/testdata/v2-log.node.pub b/internal/bundle/testdata/v2-log.node.pub
+new file mode 100644
+index 0000000..ea75be6
+--- /dev/null
++++ b/internal/bundle/testdata/v2-log.node.pub
+@@ -0,0 +1 @@
++251f6339e1beaa14392d4e9fbd36e777f86f9f458655cf7da28bedc819b1b657
+diff --git a/internal/bundle/testdata/v2-rust-case.ndjson b/internal/bundle/testdata/v2-rust-case.ndjson
+new file mode 100644
+index 0000000..7b15183
+--- /dev/null
++++ b/internal/bundle/testdata/v2-rust-case.ndjson
+@@ -0,0 +1,4 @@
++{"format":"witness-bundle/2","bundle_id":"BUNDLE-20260512-000000a1","generated_at":"2026-05-12T14:30:00Z","scope":"case","case_number":"CASE-A","department":"Honolulu PD","agency":"Honolulu Police Department","seal":"HPD-2026","node_id":"node-001","entry_count":3,"sha256_chain":"f7de811e41cef050032edb8783a046131d742141a9242d128c50f99f2f87270d","export_actor":"Sgt. Example","export_role":"evidence_clerk","signed_by":"f1661f9633fe7ebda2e7dcc4f47c049d53a39df192bf3179b54469c99620b77a","log_head":{"size":7,"root":"47e884fabe2b5b04fec431faef68a8d50d48aa2879360155ea9fc5fe3064f28b","ts":"2026-05-12T14:30:00Z","sig":"82cb36bd33434c589c0cbfd4fb836bdb197811cf5c54ac72a4344149d83f38e4d2d60668601e1c0c5b64334bc0e41d58072d0f148ed588a76211511ef89d4c08","signer_key":"4c3d2a4720cf670885dd7adf52c7398411899b8f6f9f7486c55c9754bbfe2ad9"},"proofs":[{"seq":2,"index":1,"size":7,"path":["b05322dc2d77335d39dcc2c7379adbbff57b01b74ed7da06662071981d45974d","df83406e5db41e783f6a1f38f0ae189f6e3de663efc90ad9f8d6f7b4f61b2e65","52ff302ddafb5c7b2efd642cd68a08d8842de0ad0057e971aa83437d18366b8b"]},{"seq":5,"index":4,"size":7,"path":["afea734cf62d621fce50f34ce065e42a1632f4c5e920aabdf543b84a669e4a90","06c5f7e5621f07c09e2ee4482f5c5b3b0dc4e66d2c6cbabe9b3ea8dad4d452de","da1fb290b547c865521b0cf45f8f915aa736f97bd22bd826ce4e2a7717e67b48"]},{"seq":7,"index":6,"size":7,"path":["b57b72263d71302486958bcfbeb6e2e6b415111c45baac7345cc98f34a114bd8","da1fb290b547c865521b0cf45f8f915aa736f97bd22bd826ce4e2a7717e67b48"]}],"signature":"0d0f340380d0ebdb722ce1374140628399f20acf2d42a3ca56b9f72361bb4a2fc38d7fc45a40bde5bf57c12d5cab8fa08a82a5e961d23e3613e2f57f9fc8af05"}
++{"seq":2,"ts":"2026-05-12T14:02:00Z","level":"INFO","event":"pd/access","source":"pd","data":{"item_id":"ITEM-002","case_number":"CASE-A"}}
++{"seq":5,"ts":"2026-05-12T14:05:00Z","level":"INFO","event":"pd/access","source":"pd","data":{"item_id":"ITEM-005","case_number":"CASE-A"}}
++{"seq":7,"ts":"2026-05-12T14:07:00Z","level":"INFO","event":"pd/access","source":"pd","data":{"item_id":"ITEM-007","case_number":"CASE-A"}}
+diff --git a/internal/bundle/testdata/v2-rust-log.ndjson b/internal/bundle/testdata/v2-rust-log.ndjson
+new file mode 100644
+index 0000000..4910f38
+--- /dev/null
++++ b/internal/bundle/testdata/v2-rust-log.ndjson
+@@ -0,0 +1,13 @@
++{"format":"witness-bundle/2","bundle_id":"BUNDLE-20260512-0000beef","generated_at":"2026-05-12T14:30:00Z","scope":"log","case_number":"","department":"SGAIL research","agency":"","seal":"","node_id":"farm-node-03","entry_count":12,"sha256_chain":"463a7076349da3f4207ac0dbcee2bbc81ba4928c8b529355d568403e6d8770f9","export_actor":"","export_role":"","signed_by":"f1661f9633fe7ebda2e7dcc4f47c049d53a39df192bf3179b54469c99620b77a","log_head":{"size":12,"root":"0b0250f72be82bdbd497e7f5654ea9bf59d33a4dcda1379ef42ccdf17122b199","ts":"2026-05-12T14:30:00Z","sig":"b0df13c4c46e682749b2f8e2dccf89fcd7e843a04a57e97b09f2ce57ff7958270192a52f1bd2ad438dd34bb2a997626692af582d6adb213dfd96f012b9e5c209","signer_key":"4c3d2a4720cf670885dd7adf52c7398411899b8f6f9f7486c55c9754bbfe2ad9"},"proofs":[{"seq":1,"index":0,"size":12,"path":["4b8c012f9a870814a475ba773f7566389a0003cde582a49ab3d551c9069e7f94","9dfb6b051801c015d2705380e1cba14cf553b7064fa48cb600530ba55a89bf75","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":2,"index":1,"size":12,"path":["c67b98cf34f74f165f2fc56bc8a9add62253030516f7dcb3da861f826b6e651e","9dfb6b051801c015d2705380e1cba14cf553b7064fa48cb600530ba55a89bf75","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":3,"index":2,"size":12,"path":["509f9fbefd7ac88532009c44a941cb716bf96e0c25b7e44f6c9f343dfc32b5da","d57f74b28e7d61bb295b1af19b5b9a94a7cecedf66122f189ce8ce5ae983dfc1","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":4,"index":3,"size":12,"path":["2a51a8967bcc9e48c8fd25b226a80924343289fdef76dfd4593a249f421e5a2f","d57f74b28e7d61bb295b1af19b5b9a94a7cecedf66122f189ce8ce5ae983dfc1","4d82a931396f691ab7cb46c6498cc6fb71523318fd28f1463009b798c5edb5c4","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":5,"index":4,"size":12,"path":["1ee1d9d93c3cd5e1304b9bd40335ddf718b639bcf215302ab51abc5cd88a4bb8","6e0ee2123650323ace8b68fdca921732360936a181b77ad97cb54157ad42288d","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":6,"index":5,"size":12,"path":["803cdcd2d6c713ce89df8ab58404bbcdabf2136eccdc30b89f5d498241efa2a0","6e0ee2123650323ace8b68fdca921732360936a181b77ad97cb54157ad42288d","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":7,"index":6,"size":12,"path":["d256af743020cc35a8a1550a281d314ca318c5d3e9c1906eb7eb533b1fa4068a","92ec8ca24da10946a73725058b99c9d9ea0b775ce3feecb59bb74989675067ce","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":8,"index":7,"size":12,"path":["00deb0e39b73d26a09b93b2cad905d3c7b551538969c4a61eb18da533c9025d7","92ec8ca24da10946a73725058b99c9d9ea0b775ce3feecb59bb74989675067ce","305c27faf5d3c8684f54d3bbf13f042ecfff134c79e1edbdf26afb0059dcf257","67e8138fb1f1a5b60fbd93df4f7f08ca4e8ea84fbac4540aaabdfbbdfb6cb0bf"]},{"seq":9,"index":8,"size":12,"path":["3c4837508004b2b236f5fc9d86fbbb763c388907d03e4632da94075d8dc8b2b2","17faf23fe3799b3c3c45879a8ef1c54e653027ecc25d3b195f54518874fdfe2d","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]},{"seq":10,"index":9,"size":12,"path":["84baa3a34b389a7c149a8bec7e0681f520b6dbedeeaab7616c56fddc020bd3b8","17faf23fe3799b3c3c45879a8ef1c54e653027ecc25d3b195f54518874fdfe2d","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]},{"seq":11,"index":10,"size":12,"path":["9256ec12bbb00777e12dd7c771e550c6a72e24eb9e80cb845c4f02eff8779814","1be46814ba5d8b255aa1e085c243403803cc261576631b4e7a5488984b28897c","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]},{"seq":12,"index":11,"size":12,"path":["04d9e8a2012643b87f4f5f593b084067b745a2ab3e06b83ff708e63e5a099e20","1be46814ba5d8b255aa1e085c243403803cc261576631b4e7a5488984b28897c","0adc177b8ec32a5f802e12b9496f814c0dd63973c5f71c00f3493ef7b9725675"]}],"signature":"08547e2a63ca013f690b615f38bbd36ed43b956bff39cb46608d666a6897d5b56071ce9504a0833251116658c8ebbd60f5a21e6d02d0d919f432a1c79ba5dc04"}
++{"seq":1,"ts":"2026-10-25T17:01:23.074476642Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-00"}}
++{"seq":2,"ts":"2026-10-25T17:01:23.074615322Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-01"}}
++{"seq":3,"ts":"2026-10-25T17:01:23.074826828Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-02"}}
++{"seq":4,"ts":"2026-10-25T17:01:23.07506261Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-03"}}
++{"seq":5,"ts":"2026-10-25T17:01:23.075273235Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-04"}}
++{"seq":6,"ts":"2026-10-25T17:01:23.075496564Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-05"}}
++{"seq":7,"ts":"2026-10-25T17:01:23.075703903Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-06"}}
++{"seq":8,"ts":"2026-10-25T17:01:23.075912233Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-07"}}
++{"seq":9,"ts":"2026-10-25T17:01:23.076122367Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-08"}}
++{"seq":10,"ts":"2026-10-25T17:01:23.076344424Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-09"}}
++{"seq":11,"ts":"2026-10-25T17:01:23.076557753Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-10"}}
++{"seq":12,"ts":"2026-10-25T17:01:23.076773287Z","level":"INFO","event":"farm/access","source":"farm","data":{"item":"PALLET-11"}}
+diff --git a/internal/bundle/testdata/v2-rust.export.pub b/internal/bundle/testdata/v2-rust.export.pub
+new file mode 100644
+index 0000000..af7eafa
+--- /dev/null
++++ b/internal/bundle/testdata/v2-rust.export.pub
+@@ -0,0 +1 @@
++f1661f9633fe7ebda2e7dcc4f47c049d53a39df192bf3179b54469c99620b77a
+diff --git a/internal/bundle/testdata/v2-rust.node.pub b/internal/bundle/testdata/v2-rust.node.pub
+new file mode 100644
+index 0000000..c33f115
+--- /dev/null
++++ b/internal/bundle/testdata/v2-rust.node.pub
+@@ -0,0 +1 @@
++4c3d2a4720cf670885dd7adf52c7398411899b8f6f9f7486c55c9754bbfe2ad9
+diff --git a/internal/bundle/testdata/v2-seven.export.pub b/internal/bundle/testdata/v2-seven.export.pub
+new file mode 100644
+index 0000000..fcdc81a
+--- /dev/null
++++ b/internal/bundle/testdata/v2-seven.export.pub
+@@ -0,0 +1 @@
++2b731a50c8b0fce8afce5ca5deaf4721e21b75aa917ae3f81cba59978e7209d4
+diff --git a/internal/bundle/testdata/v2-seven.ndjson b/internal/bundle/testdata/v2-seven.ndjson
+new file mode 100644
+index 0000000..2726f24
+--- /dev/null
++++ b/internal/bundle/testdata/v2-seven.ndjson
+@@ -0,0 +1,8 @@
++{"format":"witness-bundle/2","bundle_id":"BUNDLE-20260512-00000007","generated_at":"2026-05-12T14:30:00Z","scope":"log","case_number":"","department":"Sweep","agency":"","seal":"","node_id":"node-sweep","entry_count":7,"sha256_chain":"928d75d2008063576c335c0dbb30ab27fa854627a6e086dce00760543ea822eb","export_actor":"","export_role":"","signed_by":"2b731a50c8b0fce8afce5ca5deaf4721e21b75aa917ae3f81cba59978e7209d4","log_head":{"size":7,"root":"25b24be8f545dd469b4247d3938f47dd3c3f4d8bd700c313b7044969a8ca8ff8","ts":"2026-10-25T17:06:33Z","sig":"a49c4a860f7ad47426e2d48cf7d359984b7309aab8d036aa7138fa182fdfd736643b7f9ea785e722a4f5a636db8c6eb9897a4563238730823416b04d896fb208","signer_key":"a498252757e4ee11b808e33c3a537ab18bd2db889ea592be6b0fc3ab573b47e3"},"proofs":[{"seq":1,"index":0,"size":7,"path":["e41ee16f9e6a6f0c8c1584a917557d76375714f331bad85d2e3562a979f9c384","fc30ddfc31ba0604400e9d4e10524d88c517c7f0ff1c8b30e69b124a0a34864f","d530215b250ef4eaad7ab089f01c964e4932f6a1bf137273886f2b3a05327235"]},{"seq":2,"index":1,"size":7,"path":["576182887d6423e20c9e154986834538e369b94e45e2422ee83944630a977499","fc30ddfc31ba0604400e9d4e10524d88c517c7f0ff1c8b30e69b124a0a34864f","d530215b250ef4eaad7ab089f01c964e4932f6a1bf137273886f2b3a05327235"]},{"seq":3,"index":2,"size":7,"path":["24e4fc70cde633360e85c4c200feedd823a679b30e2c470e2ab1b84b28949a2a","b08c5b3e31e938e46f62ec90d48ff2b3af22967f97f4bf19937883ba30ba3a23","d530215b250ef4eaad7ab089f01c964e4932f6a1bf137273886f2b3a05327235"]},{"seq":4,"index":3,"size":7,"path":["9908666ea95c6dc84fe96dcff626dd0a2b3cf5fb19a2580074e91d041b954ea4","b08c5b3e31e938e46f62ec90d48ff2b3af22967f97f4bf19937883ba30ba3a23","d530215b250ef4eaad7ab089f01c964e4932f6a1bf137273886f2b3a05327235"]},{"seq":5,"index":4,"size":7,"path":["8bcd956ff8dcc4fbac5c20ba70ddc034fba7325604fdfc1538319d3f72fd8778","a237669e47d8e8dcdc11eaef476a7638face6d24d8ba44dcda5da3b95fabc0d8","bdd24bafaf18f680b5934d345abcc25185d78076c71ea94e3188a6a6346655a2"]},{"seq":6,"index":5,"size":7,"path":["bdc3ea5c6af07437cd77756400c1984e9e9366b431d154e420419051aa326cbc","a237669e47d8e8dcdc11eaef476a7638face6d24d8ba44dcda5da3b95fabc0d8","bdd24bafaf18f680b5934d345abcc25185d78076c71ea94e3188a6a6346655a2"]},{"seq":7,"index":6,"size":7,"path":["3656097be475690fe53745c61c4fe19f0c9f3284563a934e5d56f3e2426d9148","bdd24bafaf18f680b5934d345abcc25185d78076c71ea94e3188a6a6346655a2"]}],"signature":"35938ea62d5ea24349837a54f0be1e2729f92a346cf3d43fe9a37d74e57633138b78c75ff349bbf9ac49449e185ee0cd919fd2c68a7966c5456fac23921e6c07"}
++{"seq":1,"ts":"2026-10-25T17:06:33.461977591Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-00"}}
++{"seq":2,"ts":"2026-10-25T17:06:33.462140687Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-01"}}
++{"seq":3,"ts":"2026-10-25T17:06:33.462369826Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-02"}}
++{"seq":4,"ts":"2026-10-25T17:06:33.462587324Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-03"}}
++{"seq":5,"ts":"2026-10-25T17:06:33.462795744Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-04"}}
++{"seq":6,"ts":"2026-10-25T17:06:33.463010136Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-05"}}
++{"seq":7,"ts":"2026-10-25T17:06:33.463224989Z","level":"INFO","event":"pd/access","source":"pd","data":{"case_number":"CASE-S","item_id":"ITEM-06"}}
+diff --git a/internal/bundle/testdata/v2-seven.node.pub b/internal/bundle/testdata/v2-seven.node.pub
+new file mode 100644
+index 0000000..a25314d
+--- /dev/null
++++ b/internal/bundle/testdata/v2-seven.node.pub
+@@ -0,0 +1 @@
++a498252757e4ee11b808e33c3a537ab18bd2db889ea592be6b0fc3ab573b47e3
+diff --git a/internal/bundle/testdata/v2-slate.export.pub b/internal/bundle/testdata/v2-slate.export.pub
+new file mode 100644
+index 0000000..d3e09ac
+--- /dev/null
++++ b/internal/bundle/testdata/v2-slate.export.pub
+@@ -0,0 +1 @@
++ffb0897094f5c0fb6f913af40ebdfd6fc105eaa5a7ab30091a24493f19bb0ab3
+diff --git a/internal/bundle/testdata/v2-slate.ndjson b/internal/bundle/testdata/v2-slate.ndjson
+new file mode 100644
+index 0000000..8ce1b89
+--- /dev/null
++++ b/internal/bundle/testdata/v2-slate.ndjson
+@@ -0,0 +1,3 @@
++{"format":"witness-bundle/2","bundle_id":"BUNDLE-20261025-179764db","generated_at":"2026-10-25T21:15:07Z","scope":"case","case_number":"CASE-2026-0042","department":"Honolulu PD","agency":"Honolulu PD","seal":"HPD-2026","node_id":"node-001","entry_count":2,"sha256_chain":"75b639457d002a1c9bb2a3ad87a4097cec50983f200e83f192aba09029b26625","export_actor":"Sgt. Example","export_role":"evidence_clerk","signed_by":"ffb0897094f5c0fb6f913af40ebdfd6fc105eaa5a7ab30091a24493f19bb0ab3","log_head":{"size":4,"root":"dbede600fd9d43831d02efef881d2217d1711970499be599b9a9362627ab7856","ts":"2026-10-25T21:15:07Z","sig":"e292ac8aa7b2fbc03a8d79feeb487cc1f814be76e4fc80675482a2b37043b6ce955610968978b473e86e0807b40bb218a342272dd5b7372e0fdabe5649ec0803","signer_key":"a1cf842dfdf9471da4c38a2d9ea3ec9fc166081b8f44ca4868e6d4a53da8e660"},"proofs":[{"seq":2,"index":1,"size":4,"path":["b2642720d705da89d0f689ce40450cb544413947fe685543cd166c8544f78ea1","4462584581850ef1da88ca0a6d05c2687b6719371cd300139d9287470dd618eb"]},{"seq":3,"index":2,"size":4,"path":["84a29b6ec35af9726725e779f29a667fe2886613dfd41f997fc6acb4ec68541b","fb563102dc33bef986c57e5d7ccf25525f0599719027b0b4a2d97146ecac7959"]}],"signature":"69f6730604a1c6368f3cf81cad99859e91d68078c5755f9f4ba0faa7d0d6af930708cb8c055f4ca238e657bbe351113d826c301240b9a840a80d1025f2f8c60e"}
++{"seq":2,"ts":"2026-10-25T21:15:07.056310588Z","level":"INFO","event":"slate/intake","source":"slate","prev_hash":"90be5f8179492dc8ffeed21f14de05b1aae02d7c64b432f75f171a7219c62d32","data":{"item_id":"EV-20261025-65145a20","case_number":"CASE-2026-0042","event_type":"intake","timestamp":"2026-10-25T21:15:07.056196954Z","actor":"fba70bd51527c96dbf65f794e9","notes":"Seized laptop"}}
++{"seq":3,"ts":"2026-10-25T21:15:07.063011393Z","level":"INFO","event":"slate/intake","source":"slate","prev_hash":"cc4a14f62e3c2582d927abaad3d95798e9e3a207b5bd99e47b52f065a79c297e","data":{"item_id":"EV-20261025-53599304","case_number":"CASE-2026-0042","event_type":"intake","timestamp":"2026-10-25T21:15:07.062877281Z","actor":"fba70bd51527c96dbf65f794e9","notes":"Bank statements"}}
+diff --git a/internal/bundle/testdata/v2-slate.node.pub b/internal/bundle/testdata/v2-slate.node.pub
+new file mode 100644
+index 0000000..16c3e89
+--- /dev/null
++++ b/internal/bundle/testdata/v2-slate.node.pub
+@@ -0,0 +1 @@
++a1cf842dfdf9471da4c38a2d9ea3ec9fc166081b8f44ca4868e6d4a53da8e660
+diff --git a/internal/bundle/vectors_test.go b/internal/bundle/vectors_test.go
+new file mode 100644
+index 0000000..afa48fd
+--- /dev/null
++++ b/internal/bundle/vectors_test.go
+@@ -0,0 +1,1027 @@
++package bundle
++
++// The shared witness-bundle/2 vectors, and a reader to check them with.
++//
++// The fixtures in testdata/ were not written by this package: three came from a
++// scratch Go emitter built from the schema and then deleted, two from the Rust
++// producer in core/bundle, one from slate's own export path. The public halves
++// of the keys that signed them sit beside them, and a bundle is only ever
++// checked against those pins, never against the key it names for itself.
++//
++// The verifier below is a reader: it parses the header text, rebuilds the
++// preimage from the fields it finds there, and recomputes the tree from the
++// entry lines as written. That is a second, deliberately separate transcription
++// of section 4, so a bundle that satisfies one and not the other is a real
++// disagreement between implementations rather than a bug they share. It lives in
++// the test binary only: this package is a producer, and shipping a verifier
++// alongside it would undo the reason the format has one.
++//
++// The point of carrying the vectors into slate is that the format is now checked
++// on every change to slate, in slate's own CI, without the verifier repository
++// in the loop.
++
++import (
++	"bytes"
++	"crypto/ed25519"
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++)
++
++// rejection names the section 4.7 step that refused a bundle. The names match
++// the independent Python verifier's vocabulary, so a failure reported by either
++// implementation reads the same.
++type rejection struct {
++	step   string
++	detail string
++}
++
++func (r *rejection) Error() string { return r.step + ": " + r.detail }
++
++func refuse(step, format string, args ...any) error {
++	return &rejection{step: step, detail: fmt.Sprintf(format, args...)}
++}
++
++func stepOf(t *testing.T, err error) string {
++	t.Helper()
++	var r *rejection
++	if !errors.As(err, &r) {
++		t.Fatalf("expected a rejected step, got %v", err)
++	}
++	return r.step
++}
++
++// verifiedBundle is what a successful check learned about a file.
++type verifiedBundle struct {
++	entries   int
++	size      uint64
++	root      [32]byte
++	chain     string
++	seqs      []uint64
++	paths     [][][32]byte
++	pathLens  []int
++	exportKey ed25519.PublicKey
++	headKey   ed25519.PublicKey
++}
++
++func loadVector(t *testing.T, name string) []byte {
++	t.Helper()
++	data, err := os.ReadFile(filepath.Join("testdata", name+".ndjson"))
++	if err != nil {
++		t.Fatalf("read fixture %s: %v", name, err)
++	}
++	return data
++}
++
++func readPin(t *testing.T, name string) ed25519.PublicKey {
++	t.Helper()
++	text, err := os.ReadFile(filepath.Join("testdata", name))
++	if err != nil {
++		t.Fatalf("read pin %s: %v", name, err)
++	}
++	raw, err := hex.DecodeString(strings.TrimSpace(string(text)))
++	if err != nil || len(raw) != ed25519.PublicKeySize {
++		t.Fatalf("pin %s is not a %d-byte key", name, ed25519.PublicKeySize)
++	}
++	return ed25519.PublicKey(raw)
++}
++
++func loadPins(t *testing.T, names ...string) []ed25519.PublicKey {
++	t.Helper()
++	pins := make([]ed25519.PublicKey, 0, len(names))
++	for _, name := range names {
++		pins = append(pins, readPin(t, name))
++	}
++	return pins
++}
++
++func mustVerify(t *testing.T, name string, pins ...ed25519.PublicKey) *verifiedBundle {
++	t.Helper()
++	got, err := verifyBundle(loadVector(t, name), pins...)
++	if err != nil {
++		t.Fatalf("%s does not verify: %v", name, err)
++	}
++	return got
++}
++
++// casePins are the two pins the v2 case bundle was signed with.
++func casePins(t *testing.T) []ed25519.PublicKey {
++	t.Helper()
++	return loadPins(t, "v2-case.export.pub", "v2-case.node.pub")
++}
++
++// ---- the reader ----------------------------------------------------------
++
++func verifyBundle(data []byte, pins ...ed25519.PublicKey) (*verifiedBundle, error) {
++	lines, err := splitLines(data)
++	if err != nil {
++		return nil, err
++	}
++	header, err := parseObject(lines[0])
++	if err != nil {
++		return nil, refuse("header", "header line is not a JSON object: %v", err)
++	}
++	if format, _ := header["format"].(string); format != Format {
++		return nil, refuse("dispatch", "unknown format %v", header["format"])
++	}
++	count, err := numberField(header, "entry_count")
++	if err != nil {
++		return nil, err
++	}
++
++	// 3. both keys pinned, before any signature is believed.
++	exportKey, err := pinnedKey(pins, header, "signed_by", "bundle signer")
++	if err != nil {
++		return nil, err
++	}
++	head, ok := header["log_head"].(map[string]any)
++	if !ok {
++		return nil, refuse("header", "log_head is not an object")
++	}
++	headKey, err := pinnedKey(pins, head, "signer_key", "log head signer")
++	if err != nil {
++		return nil, err
++	}
++
++	// 4. the bundle signature, over the preimage rebuilt from the header.
++	signature, err := hexField(header, "signature", ed25519.SignatureSize)
++	if err != nil {
++		return nil, err
++	}
++	preimage, err := preimageOf(header)
++	if err != nil {
++		return nil, err
++	}
++	if !ed25519.Verify(exportKey, preimage, signature) {
++		return nil, refuse("signature", "bundle signature does not verify")
++	}
++
++	// 5. the header must describe the bytes that follow it.
++	entries := lines[1:]
++	if uint64(len(entries)) != count {
++		return nil, refuse("count", "entry_count %d, file has %d lines", count, len(entries))
++	}
++	digest := sha256.Sum256(bytes.Join(entries, nil))
++	chain, err := textField(header, "sha256_chain")
++	if err != nil {
++		return nil, err
++	}
++	if !strings.EqualFold(chain, hex.EncodeToString(digest[:])) {
++		return nil, refuse("digest", "sha256_chain does not match the entry lines")
++	}
++
++	// 6. the head is the node's statement about the log it kept.
++	size, err := numberField(head, "size")
++	if err != nil {
++		return nil, err
++	}
++	root, err := hexField(head, "root", 32)
++	if err != nil {
++		return nil, err
++	}
++	headSignature, err := hexField(head, "sig", ed25519.SignatureSize)
++	if err != nil {
++		return nil, err
++	}
++	headInput := make([]byte, 40)
++	binary.BigEndian.PutUint64(headInput[:8], size)
++	copy(headInput[8:], root)
++	var rootHash [32]byte
++	copy(rootHash[:], root)
++	if !ed25519.Verify(headKey, headInput, headSignature) {
++		return nil, refuse("head", "log head signature does not verify")
++	}
++
++	// 7. the case claim, and the sequence it is made about.
++	scope, err := textField(header, "scope")
++	if err != nil {
++		return nil, err
++	}
++	caseNumber, err := textField(header, "case_number")
++	if err != nil {
++		return nil, err
++	}
++	switch {
++	case scope != string(ScopeCase) && scope != string(ScopeLog):
++		return nil, refuse("scope", "unknown scope %q", scope)
++	case scope == string(ScopeCase) && caseNumber == "":
++		return nil, refuse("scope", "scope=case requires a non-empty case_number")
++	case scope == string(ScopeLog) && caseNumber != "":
++		return nil, refuse("scope", "scope=log requires an empty case_number")
++	case scope == string(ScopeLog) && count != size:
++		return nil, refuse("scope", "scope=log with entry_count %d under a head of %d", count, size)
++	}
++
++	seqs := make([]uint64, len(entries))
++	var previous uint64
++	for i, line := range entries {
++		entry, err := parseObject(line)
++		if err != nil {
++			return nil, refuse("entries", "entry line %d is not a JSON object: %v", i+1, err)
++		}
++		seq, err := numberField(entry, "seq")
++		if err != nil {
++			return nil, err
++		}
++		if seq <= previous {
++			return nil, refuse("entries", "seq %d is not ascending (after %d)", seq, previous)
++		}
++		previous = seq
++		seqs[i] = seq
++		if scope != string(ScopeCase) {
++			continue
++		}
++		payload, _ := entry["data"].(map[string]any)
++		got, _ := payload["case_number"].(string)
++		if got != caseNumber {
++			return nil, refuse("scope", "entry seq %d has case_number %q, header says %q",
++				seq, got, caseNumber)
++		}
++	}
++
++	// 8. every entry is the leaf its proof claims, under that root.
++	rawProofs, ok := header["proofs"].([]any)
++	if !ok {
++		return nil, refuse("proofs", "proofs is not an array")
++	}
++	bySeq := make(map[uint64]map[string]any, len(rawProofs))
++	for _, item := range rawProofs {
++		proof, ok := item.(map[string]any)
++		if !ok {
++			return nil, refuse("proofs", "proof is not an object")
++		}
++		seq, err := numberField(proof, "seq")
++		if err != nil {
++			return nil, err
++		}
++		if _, duplicate := bySeq[seq]; duplicate {
++			return nil, refuse("proofs", "duplicate proof for seq %d", seq)
++		}
++		bySeq[seq] = proof
++	}
++	if len(bySeq) != len(entries) {
++		return nil, refuse("proofs", "%d proofs for %d entries", len(bySeq), len(entries))
++	}
++
++	paths := make([][][32]byte, len(entries))
++	pathLens := make([]int, len(entries))
++	for i, seq := range seqs {
++		proof, present := bySeq[seq]
++		if !present {
++			return nil, refuse("proofs", "entry seq %d has no inclusion proof", seq)
++		}
++		index, err := numberField(proof, "index")
++		if err != nil {
++			return nil, err
++		}
++		proofSize, err := numberField(proof, "size")
++		if err != nil {
++			return nil, err
++		}
++		if proofSize != size {
++			return nil, refuse("proofs", "entry seq %d: proof names a tree of %d, head is %d",
++				seq, proofSize, size)
++		}
++		if index != seq-1 {
++			return nil, refuse("proofs", "entry seq %d: proof index %d, expected %d",
++				seq, index, seq-1)
++		}
++		path, err := proofPath(proof, seq)
++		if err != nil {
++			return nil, err
++		}
++		if !includes(rootHash, hashLeaf(entries[i]), index, proofSize, path) {
++			return nil, refuse("inclusion", "entry seq %d is not in the tree the head signed", seq)
++		}
++		paths[i] = path
++		pathLens[i] = len(path)
++	}
++
++	return &verifiedBundle{
++		entries:   len(entries),
++		size:      size,
++		root:      rootHash,
++		chain:     chain,
++		seqs:      seqs,
++		paths:     paths,
++		pathLens:  pathLens,
++		exportKey: exportKey,
++		headKey:   headKey,
++	}, nil
++}
++
++// splitLines is step 1: the container is NDJSON with no tolerance for reformatting,
++// because every byte of an entry line is a leaf.
++func splitLines(data []byte) ([][]byte, error) {
++	if len(data) == 0 {
++		return nil, refuse("split", "file is empty")
++	}
++	if bytes.ContainsRune(data, '\r') {
++		return nil, refuse("split", "file contains CR; the format is newline terminated")
++	}
++	if !bytes.HasSuffix(data, []byte("\n")) {
++		return nil, refuse("split", "file does not end with a newline")
++	}
++	lines := bytes.Split(data[:len(data)-1], []byte("\n"))
++	for i, line := range lines {
++		if len(line) == 0 {
++			return nil, refuse("split", "line %d is blank", i+1)
++		}
++	}
++	return lines, nil
++}
++
++func parseObject(line []byte) (map[string]any, error) {
++	decoder := json.NewDecoder(bytes.NewReader(line))
++	decoder.UseNumber()
++	var object map[string]any
++	if err := decoder.Decode(&object); err != nil {
++		return nil, err
++	}
++	if object == nil {
++		return nil, errors.New("not an object")
++	}
++	return object, nil
++}
++
++// textField reads an optional string; absent means empty, as in section 4.3.
++func textField(object map[string]any, field string) (string, error) {
++	raw, present := object[field]
++	if !present || raw == nil {
++		return "", nil
++	}
++	value, ok := raw.(string)
++	if !ok {
++		return "", refuse("header", "%s is not a string", field)
++	}
++	return value, nil
++}
++
++func numberField(object map[string]any, field string) (uint64, error) {
++	raw, present := object[field]
++	if !present || raw == nil {
++		return 0, refuse("header", "%s is required", field)
++	}
++	number, ok := raw.(json.Number)
++	if !ok {
++		return 0, refuse("header", "%s is not a number", field)
++	}
++	value, err := strconv.ParseUint(number.String(), 10, 64)
++	if err != nil {
++		return 0, refuse("header", "%s is not a non-negative integer: %v", field, err)
++	}
++	return value, nil
++}
++
++func hexField(object map[string]any, field string, size int) ([]byte, error) {
++	text, err := textField(object, field)
++	if err != nil {
++		return nil, err
++	}
++	if text == "" {
++		return nil, refuse("header", "%s is required", field)
++	}
++	raw, err := hex.DecodeString(text)
++	if err != nil || len(raw) != size {
++		return nil, refuse("header", "%s is not %d hex-encoded bytes", field, size)
++	}
++	return raw, nil
++}
++
++func pinnedKey(pins []ed25519.PublicKey, object map[string]any, field, what string) (ed25519.PublicKey, error) {
++	text, err := textField(object, field)
++	if err != nil {
++		return nil, err
++	}
++	raw, err := hex.DecodeString(text)
++	if err != nil || len(raw) != ed25519.PublicKeySize {
++		return nil, refuse("pin", "%s %q is not a %d-byte key", what, text, ed25519.PublicKeySize)
++	}
++	for _, pin := range pins {
++		if bytes.Equal(raw, pin) {
++			return pin, nil
++		}
++	}
++	return nil, refuse("pin", "%s %s is not in the pinned set", what, text)
++}
++
++func proofPath(proof map[string]any, seq uint64) ([][32]byte, error) {
++	raw, ok := proof["path"].([]any)
++	if !ok {
++		return nil, refuse("proofs", "entry seq %d: path is not an array", seq)
++	}
++	path := make([][32]byte, len(raw))
++	for i, node := range raw {
++		text, ok := node.(string)
++		if !ok {
++			return nil, refuse("proofs", "entry seq %d: malformed proof node", seq)
++		}
++		decoded, err := hex.DecodeString(text)
++		if err != nil || len(decoded) != 32 {
++			return nil, refuse("proofs", "entry seq %d: malformed proof node", seq)
++		}
++		copy(path[i][:], decoded)
++	}
++	return path, nil
++}
++
++// preimageOf rebuilds section 4.3 from the header as parsed. Fields outside the
++// list are ignored, which is what lets a producer add one without breaking
++// signatures — and what stops one from smuggling a field into the preimage.
++func preimageOf(header map[string]any) ([]byte, error) {
++	head, ok := header["log_head"].(map[string]any)
++	if !ok {
++		return nil, refuse("preimage", "log_head is not an object")
++	}
++	var out strings.Builder
++	out.WriteString(Format)
++	out.WriteByte('\n')
++	for _, field := range []string{
++		"bundle_id", "generated_at", "scope", "case_number", "department",
++		"agency", "seal", "node_id", "entry_count", "sha256_chain",
++		"export_actor", "export_role", "signed_by",
++	} {
++		value, err := preimageValue(header, field)
++		if err != nil {
++			return nil, err
++		}
++		if strings.ContainsAny(value, "\r\n") {
++			return nil, refuse("preimage", "%s contains a line break", field)
++		}
++		out.WriteString(field)
++		out.WriteByte('=')
++		out.WriteString(value)
++		out.WriteByte('\n')
++	}
++	for _, field := range []string{"size", "root", "ts", "signer_key"} {
++		value, err := preimageValue(head, field)
++		if err != nil {
++			return nil, err
++		}
++		if strings.ContainsAny(value, "\r\n") {
++			return nil, refuse("preimage", "log_head.%s contains a line break", field)
++		}
++		out.WriteString("log_head.")
++		out.WriteString(field)
++		out.WriteByte('=')
++		out.WriteString(value)
++		out.WriteByte('\n')
++	}
++	return []byte(out.String()), nil
++}
++
++func preimageValue(object map[string]any, field string) (string, error) {
++	if field == "entry_count" || field == "size" {
++		number, err := numberField(object, field)
++		if err != nil {
++			return "", err
++		}
++		return strconv.FormatUint(number, 10), nil
++	}
++	return textField(object, field)
++}
++
++// includes folds one audit path from the leaf to the root by the rule in section
++// 4.5: hash the sibling on the left when the running index is odd or is already
++// the last leaf of its subtree, and finish only when both indices are exhausted.
++// A path that is too short, too long, or belongs to another tree leaves one
++// behind and is refused.
++func includes(root, leaf [32]byte, index, size uint64, path [][32]byte) bool {
++	if size == 0 || index >= size {
++		return false
++	}
++	fn, sn := index, size-1
++	running := leaf
++	for _, sibling := range path {
++		if sn == 0 {
++			return false
++		}
++		if fn&1 == 1 || fn == sn {
++			running = hashNode(sibling, running)
++			for fn&1 == 0 && fn != 0 {
++				fn >>= 1
++				sn >>= 1
++			}
++		} else {
++			running = hashNode(running, sibling)
++		}
++		fn >>= 1
++		sn >>= 1
++	}
++	return sn == 0 && running == root
++}
++
++// ---- fixtures written by other implementations ---------------------------
++
++func TestSharedVectorsVerify(t *testing.T) {
++	cases := []struct {
++		name    string
++		pins    []string
++		entries int
++		size    uint64
++		seqs    []uint64
++		pathLen int
++	}{
++		{
++			name:    "v2-case",
++			pins:    []string{"v2-case.export.pub", "v2-case.node.pub"},
++			entries: 4, size: 500,
++			seqs:    []uint64{1, 126, 251, 376},
++			pathLen: 9,
++		},
++		{
++			name:    "v2-log",
++			pins:    []string{"v2-log.export.pub", "v2-log.node.pub"},
++			entries: 12, size: 12,
++			seqs:    []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
++			pathLen: 4,
++		},
++		{
++			// A 4+3 split whose right subtree splits again: three-hash paths
++			// over an unbalanced tree, which is where a wrong split point or a
++			// wrong sibling order shows up.
++			name:    "v2-seven",
++			pins:    []string{"v2-seven.export.pub", "v2-seven.node.pub"},
++			entries: 7, size: 7,
++			seqs:    []uint64{1, 2, 3, 4, 5, 6, 7},
++			pathLen: 3,
++		},
++		{
++			name:    "v2-rust-log",
++			pins:    []string{"v2-rust.export.pub", "v2-rust.node.pub"},
++			entries: 12, size: 12,
++			seqs:    []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
++			pathLen: 4,
++		},
++		{
++			// Three entries from a seven-record log at non-contiguous seqs: the
++			// proofs come from the full tree and their indices are seq-1.
++			name:    "v2-rust-case",
++			pins:    []string{"v2-rust.export.pub", "v2-rust.node.pub"},
++			entries: 3, size: 7,
++			seqs:    []uint64{2, 5, 7},
++			pathLen: 3,
++		},
++		{
++			name:    "v2-slate",
++			pins:    []string{"v2-slate.export.pub", "v2-slate.node.pub"},
++			entries: 2, size: 4,
++			seqs:    []uint64{2, 3},
++			pathLen: 2,
++		},
++	}
++
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			got := mustVerify(t, c.name, loadPins(t, c.pins...)...)
++			if got.entries != c.entries {
++				t.Fatalf("entries %d, want %d", got.entries, c.entries)
++			}
++			if got.size != c.size {
++				t.Fatalf("head size %d, want %d", got.size, c.size)
++			}
++			if len(got.seqs) != len(c.seqs) {
++				t.Fatalf("seqs %v, want %v", got.seqs, c.seqs)
++			}
++			for i := range c.seqs {
++				if got.seqs[i] != c.seqs[i] {
++					t.Fatalf("seqs %v, want %v", got.seqs, c.seqs)
++				}
++			}
++			if got.pathLens[0] != c.pathLen {
++				t.Fatalf("first audit path is %d hashes, want %d", got.pathLens[0], c.pathLen)
++			}
++		})
++	}
++}
++
++func TestProducersAgreeOnTheSameEntryLines(t *testing.T) {
++	// The Rust producer and the scratch emitter were written from the schema
++	// separately and given the same twelve entry lines. Equal roots and equal
++	// sha256_chain over bytes neither of them chose is the cross-language check
++	// of the leaf rule, the node rule and the tree split.
++	goLog := mustVerify(t, "v2-log", loadPins(t, "v2-log.export.pub", "v2-log.node.pub")...)
++	rustLog := mustVerify(t, "v2-rust-log", loadPins(t, "v2-rust.export.pub", "v2-rust.node.pub")...)
++
++	if goLog.root != rustLog.root {
++		t.Fatalf("roots differ:\n go   %x\n rust %x", goLog.root, rustLog.root)
++	}
++	if goLog.chain != rustLog.chain {
++		t.Fatalf("sha256_chain differs: %s vs %s", goLog.chain, rustLog.chain)
++	}
++}
++
++func TestTheSlateVectorUsesTwoKeys(t *testing.T) {
++	// The one vector written through the product's export path: distinct node
++	// and exporter keys, which is what makes "both pins" a real requirement
++	// rather than an accident of one key being used twice.
++	got := mustVerify(t, "v2-slate", loadPins(t, "v2-slate.export.pub", "v2-slate.node.pub")...)
++	if bytes.Equal(got.exportKey, got.headKey) {
++		t.Fatal("the slate vector was signed with a single key; it no longer tests the two-pin rule")
++	}
++}
++
++func TestTheTreeAgreesWithFullLogVectors(t *testing.T) {
++	// The producer's own tree — the split point, the sibling order, the leaf
++	// preimage — rebuilt over the entry lines of vectors written by other
++	// implementations, for the two log-scope fixtures whose whole log is in the
++	// file. Same root, and every path identical hash for hash: order is
++	// load-bearing, so a path is compared element by element rather than by
++	// length or by whether the fold happens to succeed.
++	cases := []struct {
++		name string
++		pins []string
++	}{
++		{"v2-log", []string{"v2-log.export.pub", "v2-log.node.pub"}},
++		{"v2-seven", []string{"v2-seven.export.pub", "v2-seven.node.pub"}},
++		{"v2-rust-log", []string{"v2-rust.export.pub", "v2-rust.node.pub"}},
++	}
++
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			lines, err := splitLines(loadVector(t, c.name))
++			if err != nil {
++				t.Fatal(err)
++			}
++			want := mustVerify(t, c.name, loadPins(t, c.pins...)...)
++
++			leaves := make([][32]byte, len(lines)-1)
++			for i, line := range lines[1:] {
++				leaves[i] = hashLeaf(line)
++			}
++			built := newTree(leaves)
++			if got, expected := built.rootHash(), want.root; got != expected {
++				t.Fatalf("root %x, vector says %x", got, expected)
++			}
++			for i, seq := range want.seqs {
++				got := built.prove(int(seq - 1))
++				if len(got) != len(want.paths[i]) {
++					t.Fatalf("seq %d: %d hashes, vector says %d", seq, len(got), len(want.paths[i]))
++				}
++				for j := range got {
++					if got[j] != want.paths[i][j] {
++						t.Fatalf("seq %d: hash %d is %x, vector says %x",
++							seq, j, got[j], want.paths[i][j])
++					}
++				}
++			}
++		})
++	}
++}
++
++// ---- the refusals --------------------------------------------------------
++
++// parts splits a vector into a header that can be mutated and its entry lines.
++func parts(t *testing.T, name string) (map[string]any, [][]byte) {
++	t.Helper()
++	lines, err := splitLines(loadVector(t, name))
++	if err != nil {
++		t.Fatalf("split %s: %v", name, err)
++	}
++	header, err := parseObject(lines[0])
++	if err != nil {
++		t.Fatalf("header %s: %v", name, err)
++	}
++	return header, lines[1:]
++}
++
++func emit(t *testing.T, header map[string]any, entries [][]byte) []byte {
++	t.Helper()
++	var out bytes.Buffer
++	line, err := json.Marshal(header)
++	if err != nil {
++		t.Fatalf("marshal header: %v", err)
++	}
++	out.Write(line)
++	out.WriteByte('\n')
++	for _, entry := range entries {
++		out.Write(entry)
++		out.WriteByte('\n')
++	}
++	return out.Bytes()
++}
++
++// resignAs signs the header as key. An exporter with a valid key can restate
++// anything the signature covers; the checks that only the proofs and the node's
++// key can catch are the ones below.
++func resignAs(t *testing.T, header map[string]any, entries [][]byte, key ed25519.PrivateKey) []byte {
++	t.Helper()
++	public, ok := key.Public().(ed25519.PublicKey)
++	if !ok {
++		t.Fatal("private key does not carry a public key")
++	}
++	header["signed_by"] = hex.EncodeToString(public)
++	preimage, err := preimageOf(header)
++	if err != nil {
++		t.Fatalf("preimage: %v", err)
++	}
++	header["signature"] = hex.EncodeToString(ed25519.Sign(key, preimage))
++	return emit(t, header, entries)
++}
++
++// dishonest is a key that is pinned but not trusted to behave: it can sign
++// whatever it likes, which is what a verifier has to survive.
++func dishonest() (ed25519.PrivateKey, ed25519.PublicKey) {
++	key := ed25519.NewKeyFromSeed(bytesOf('a', 32))
++	public, ok := key.Public().(ed25519.PublicKey)
++	if !ok {
++		panic("private key does not carry a public key")
++	}
++	return key, public
++}
++
++func TestContainerAndDigestFailures(t *testing.T) {
++	data := loadVector(t, "v2-case")
++	pins := casePins(t)
++
++	t.Run("CRLF is refused", func(t *testing.T) {
++		_, err := verifyBundle(bytes.ReplaceAll(data, []byte("\n"), []byte("\r\n")), pins...)
++		if got := stepOf(t, err); got != "split" {
++			t.Fatalf("step %q, want split", got)
++		}
++	})
++
++	t.Run("a missing final newline is refused", func(t *testing.T) {
++		_, err := verifyBundle(bytes.TrimSuffix(data, []byte("\n")), pins...)
++		if got := stepOf(t, err); got != "split" {
++			t.Fatalf("step %q, want split", got)
++		}
++	})
++
++	t.Run("a blank line is refused", func(t *testing.T) {
++		_, err := verifyBundle(append(append([]byte{}, data...), '\n'), pins...)
++		if got := stepOf(t, err); got != "split" {
++			t.Fatalf("step %q, want split", got)
++		}
++	})
++
++	t.Run("a stripped format marker is refused", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		delete(header, "format")
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "dispatch" {
++			t.Fatalf("step %q, want dispatch", got)
++		}
++	})
++
++	t.Run("an unknown format is refused", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		header["format"] = "witness-bundle/3"
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "dispatch" {
++			t.Fatalf("step %q, want dispatch", got)
++		}
++	})
++
++	t.Run("an edited entry fails at the digest", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		if !bytes.Contains(entries[0], []byte("ITEM-000")) {
++			t.Fatal("the fixture no longer contains ITEM-000")
++		}
++		entries[0] = bytes.Replace(entries[0], []byte("ITEM-000"), []byte("ITEM-999"), 1)
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "digest" {
++			t.Fatalf("step %q, want digest", got)
++		}
++	})
++
++	t.Run("a dropped entry fails at the count", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		short := emit(t, header, entries[:len(entries)-1])
++		if got := stepOf(t, verifyBundleStep(short, pins)); got != "count" {
++			t.Fatalf("step %q, want count", got)
++		}
++	})
++
++	t.Run("entries under an unchanged header fail at the count", func(t *testing.T) {
++		header, _ := parts(t, "v2-case")
++		if got := stepOf(t, verifyBundleStep(emit(t, header, nil), pins)); got != "count" {
++			t.Fatalf("step %q, want count", got)
++		}
++	})
++}
++
++// verifyBundleStep is verifyBundle for tests that only want the refusal, keeping
++// the call sites to one line each.
++func verifyBundleStep(data []byte, pins []ed25519.PublicKey) error {
++	_, err := verifyBundle(data, pins...)
++	return err
++}
++
++func TestProofFailures(t *testing.T) {
++	pins := casePins(t)
++
++	t.Run("stripped proofs are refused", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		header["proofs"] = []any{}
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "proofs" {
++			t.Fatalf("step %q, want proofs", got)
++		}
++	})
++
++	t.Run("a duplicate proof seq is refused", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		proofs := header["proofs"].([]any)
++		proofs[1].(map[string]any)["seq"] = proofs[0].(map[string]any)["seq"]
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "proofs" {
++			t.Fatalf("step %q, want proofs", got)
++		}
++	})
++
++	t.Run("a proof for another tree size is refused", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		proofs := header["proofs"].([]any)
++		proofs[0].(map[string]any)["size"] = json.Number("4")
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "proofs" {
++			t.Fatalf("step %q, want proofs", got)
++		}
++	})
++
++	t.Run("a wrong index is refused", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		proofs := header["proofs"].([]any)
++		proofs[0].(map[string]any)["index"] = json.Number("1")
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "proofs" {
++			t.Fatalf("step %q, want proofs", got)
++		}
++	})
++
++	t.Run("a reversed audit path fails inclusion", func(t *testing.T) {
++		header, entries := parts(t, "v2-case")
++		proofs := header["proofs"].([]any)
++		path := proofs[0].(map[string]any)["path"].([]any)
++		for left, right := 0, len(path)-1; left < right; left, right = left+1, right-1 {
++			path[left], path[right] = path[right], path[left]
++		}
++		if got := stepOf(t, verifyBundleStep(emit(t, header, entries), pins)); got != "inclusion" {
++			t.Fatalf("step %q, want inclusion", got)
++		}
++	})
++}
++
++func TestBothPinsAreRequired(t *testing.T) {
++	data := loadVector(t, "v2-slate")
++
++	t.Run("no pins", func(t *testing.T) {
++		if got := stepOf(t, verifyBundleStep(data, nil)); got != "pin" {
++			t.Fatalf("step %q, want pin", got)
++		}
++	})
++
++	for _, only := range []string{"v2-slate.export.pub", "v2-slate.node.pub"} {
++		t.Run("only "+only, func(t *testing.T) {
++			if got := stepOf(t, verifyBundleStep(data, loadPins(t, only))); got != "pin" {
++				t.Fatalf("step %q, want pin", got)
++			}
++		})
++	}
++
++	t.Run("an unrelated pin", func(t *testing.T) {
++		_, public := dishonest()
++		if got := stepOf(t, verifyBundleStep(data, []ed25519.PublicKey{public})); got != "pin" {
++			t.Fatalf("step %q, want pin", got)
++		}
++	})
++}
++
++func TestScopeFailures(t *testing.T) {
++	key, public := dishonest()
++	pins := append(casePins(t), public)
++
++	// A dishonest but pinned exporter: these failures must survive a valid
++	// signature, otherwise they would only be testing the signature step.
++	sign := func(mutate func(map[string]any, [][]byte)) []byte {
++		header, entries := parts(t, "v2-case")
++		mutate(header, entries)
++		return resignAs(t, header, entries, key)
++	}
++
++	t.Run("a re-signed bundle with no tampering verifies", func(t *testing.T) {
++		// Control: the harness reaches VERIFIED, so each failure below is the
++		// check under test and not a broken fixture reader.
++		if _, err := verifyBundle(sign(func(map[string]any, [][]byte) {}), pins...); err != nil {
++			t.Fatalf("control bundle does not verify: %v", err)
++		}
++	})
++
++	t.Run("an unknown scope is refused", func(t *testing.T) {
++		data := sign(func(header map[string]any, _ [][]byte) { header["scope"] = "everything" })
++		if got := stepOf(t, verifyBundleStep(data, pins)); got != "scope" {
++			t.Fatalf("step %q, want scope", got)
++		}
++	})
++
++	t.Run("scope=log over a subset is refused", func(t *testing.T) {
++		data := sign(func(header map[string]any, _ [][]byte) {
++			header["scope"] = string(ScopeLog)
++			header["case_number"] = ""
++		})
++		if got := stepOf(t, verifyBundleStep(data, pins)); got != "scope" {
++			t.Fatalf("step %q, want scope", got)
++		}
++	})
++
++	t.Run("scope=case without a case number is refused", func(t *testing.T) {
++		data := sign(func(header map[string]any, _ [][]byte) { header["case_number"] = "" })
++		if got := stepOf(t, verifyBundleStep(data, pins)); got != "scope" {
++			t.Fatalf("step %q, want scope", got)
++		}
++	})
++
++	t.Run("a relabelled case is refused", func(t *testing.T) {
++		data := sign(func(header map[string]any, _ [][]byte) { header["case_number"] = "CASE-B" })
++		if got := stepOf(t, verifyBundleStep(data, pins)); got != "scope" {
++			t.Fatalf("step %q, want scope", got)
++		}
++	})
++
++	t.Run("a line break in a field is refused before signing", func(t *testing.T) {
++		// The injection surface of a line-oriented preimage: a department of
++		// "Honolulu PD\nextra=field" would forge a second preimage line if the
++		// reader joined fields without splitting on them.
++		header, entries := parts(t, "v2-case")
++		header["department"] = "Honolulu PD\nextra=field"
++		line, err := json.Marshal(header)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var file bytes.Buffer
++		file.Write(line)
++		file.WriteByte('\n')
++		for _, entry := range entries {
++			file.Write(entry)
++			file.WriteByte('\n')
++		}
++		if got := stepOf(t, verifyBundleStep(file.Bytes(), pins)); got != "preimage" {
++			t.Fatalf("step %q, want preimage", got)
++		}
++	})
++}
++
++func TestADishonestExporterWithAPinnedKey(t *testing.T) {
++	key, public := dishonest()
++	pins := []ed25519.PublicKey{public, readPin(t, "v2-case.node.pub")}
++
++	t.Run("a substituted entry fails inclusion", func(t *testing.T) {
++		// The exporter can re-sign and recompute the chain, because it owns the
++		// chain and the header. It cannot make new bytes a leaf of the node's
++		// tree, and this is the only check that catches it.
++		header, entries := parts(t, "v2-case")
++		entry, err := parseObject(entries[0])
++		if err != nil {
++			t.Fatal(err)
++		}
++		payload, ok := entry["data"].(map[string]any)
++		if !ok {
++			t.Fatal("the first entry has no data object")
++		}
++		if payload["item_id"] != "ITEM-000" {
++			t.Fatalf("first entry item_id %v, want ITEM-000", payload["item_id"])
++		}
++		payload["item_id"] = "ITEM-999"
++		entries[0], err = json.Marshal(entry)
++		if err != nil {
++			t.Fatal(err)
++		}
++		digest := sha256.Sum256(bytes.Join(entries, nil))
++		header["sha256_chain"] = hex.EncodeToString(digest[:])
++
++		if got := stepOf(t, verifyBundleStep(resignAs(t, header, entries, key), pins)); got != "inclusion" {
++			t.Fatalf("step %q, want inclusion", got)
++		}
++	})
++
++	t.Run("a restated head fails at the head signature", func(t *testing.T) {
++		// The head signature covers size||root under the node's key, so an
++		// exporter cannot point the bundle at a different tree.
++		header, entries := parts(t, "v2-case")
++		head := header["log_head"].(map[string]any)
++		head["root"] = strings.Repeat("00", 32)
++		if got := stepOf(t, verifyBundleStep(resignAs(t, header, entries, key), pins)); got != "head" {
++			t.Fatalf("step %q, want head", got)
++		}
++	})
++
++	t.Run("an empty case bundle is still a signed claim", func(t *testing.T) {
++		// A case with no records is a real artifact: the head still proves the
++		// node kept a log, and an empty proof list is the honest answer.
++		header, _ := parts(t, "v2-case")
++		empty := sha256.Sum256(nil)
++		header["entry_count"] = json.Number("0")
++		header["sha256_chain"] = hex.EncodeToString(empty[:])
++		header["proofs"] = []any{}
++
++		got, err := verifyBundle(resignAs(t, header, nil, key), pins...)
++		if err != nil {
++			t.Fatalf("an empty case bundle was refused: %v", err)
++		}
++		if got.entries != 0 {
++			t.Fatalf("entries %d, want 0", got.entries)
++		}
++	})
 +}
 diff --git a/internal/export/export.go b/internal/export/export.go
 index b95e088..5e75fa7 100644

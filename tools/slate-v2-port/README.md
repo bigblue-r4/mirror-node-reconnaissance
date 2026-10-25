@@ -19,7 +19,7 @@ go build -o slate ./cmd/slate
 ```
 
 Base: `c198ce0` — *release: v1.5.0 — signed truncation anchor*.
-Patch: `slate-v2-producer.patch` — 1,242 lines added, 49 removed, across 12 files.
+Patch: `slate-v2-producer.patch` — 2,350 lines added, 49 removed, across 30 files.
 Toolchain used: Go 1.25.3 (the module declares `go 1.22`).
 
 ## What it changes
@@ -29,6 +29,8 @@ Toolchain used: Go 1.25.3 (the module declares `go 1.22`).
 | `internal/bundle/merkle.go` | new — BLAKE3 Merkle tree, RFC 6962 split, leaf-first audit paths |
 | `internal/bundle/bundle.go` | new — header, §4.3 preimage, signed head, per-entry proofs, encoding, `O_EXCL` write |
 | `internal/bundle/bundle_test.go` | new — 9 tests: preimage bytes, tree paths 1–9 leaves, case filtering, both signatures, refusals |
+| `internal/bundle/vectors_test.go` | new — 9 tests: the shared vectors read back, the §4.7 steps as a reader, every refusal |
+| `internal/bundle/testdata/` | new — the six v2 vectors and their public keys, copied from `tools/bundle-verify/testdata/` |
 | `cmd/slate/main.go` | `export` defaults to v2, `--format=1` escape hatch; `/api/export` defaults to v2 with `"format": 1`; `exportSigningKeys` |
 | `cmd/slate/export_integration_test.go` | new — 4 tests: API default, legacy path, unknown format, output location |
 | `internal/export/export.go` | `DecodePrivateKey` extracted from `Sign` |
@@ -72,6 +74,18 @@ ok  github.com/bigblue-r4/slate/internal/query
 ok  github.com/bigblue-r4/slate/internal/store
 ```
 
+18 tests and 35 subtests in `internal/bundle`, 4 more in `cmd/slate`. No new
+dependency: the package still imports only `internal/store`, the standard library
+and BLAKE3.
+
+`golangci-lint` v2.15.0 with default linters reports **16 issues before the patch
+and 16 after** — the same pre-existing `errcheck` findings in `internal/discovery`,
+`internal/store` and `cmd/slate`, so `slate`'s lint step is already red at
+`c198ce0` and this patch is not what turned it red. `internal/bundle` on its own
+reports 0. The one finding the patch did add — `QF1012` on a
+`WriteString(fmt.Sprintf(...))` in `Preimage` — is fixed with
+`strconv.FormatUint`.
+
 End to end, against a real store built with `slate init` and three intakes:
 
 ```
@@ -114,6 +128,34 @@ with its public keys, and the Python suite verifies it on every run. That closes
 the schema's stated gap — until now no product had written a v2 bundle — with the
 caveat that the product is `slate` **with this patch applied**, not upstream.
 
+## Tests that run in slate's CI
+
+The six v2 vectors and their public keys are copied into
+`internal/bundle/testdata/`, and `vectors_test.go` carries the verifier's half of
+§4.7 — a reader, not a second producer — so the format is checked on every change
+to `slate`, in `slate`'s own CI, with no other repository in the loop. The
+listing in `slate`'s `ci.yml` runs `gofmt -l`, `go test ./...`, `go build`, `go
+vet` and `golangci-lint`; these tests are inside that.
+
+| Test | What it holds |
+|---|---|
+| `TestSharedVectorsVerify` | all six vectors verify against their pins: entry counts, head sizes, `seq`s, audit-path lengths |
+| `TestProducersAgreeOnTheSameEntryLines` | the Rust and scratch-Go log bundles over the same twelve lines have equal roots and equal `sha256_chain` |
+| `TestTheTreeAgreesWithFullLogVectors` | slate's own tree, rebuilt over those entry lines, reaches the same root and the same paths hash for hash (12 and 7 leaves) |
+| `TestTheSlateVectorUsesTwoKeys` | the one product-written vector has distinct node and exporter keys, so the two-pin rule is exercised rather than assumed |
+| `TestContainerAndDigestFailures` | CRLF, a missing final newline, a blank line, a stripped or unknown `format`, an edited entry (digest), a dropped entry (count) |
+| `TestProofFailures` | stripped proofs, a duplicate `seq`, a proof naming another tree size, a wrong index, a reversed path (inclusion) |
+| `TestBothPinsAreRequired` | no pins, either pin alone, an unrelated pin |
+| `TestScopeFailures` | an unknown scope, `scope=log` over a subset, `scope=case` without a case number, a relabelled case, a line break smuggled into a header value — each re-signed first, so the refusal is the check under test and not the signature |
+| `TestADishonestExporterWithAPinnedKey` | a pinned but dishonest exporter: a substituted entry fails at inclusion, a restated head fails at the head signature, and an empty case bundle still verifies |
+
+The control case in `TestScopeFailures` signs an unmodified bundle and expects
+`VERIFIED`, so the failures below it cannot be the harness refusing everything.
+Three sabotages confirm the vectors bite rather than merely pass: leaf prefix
+`0x00` → `0x02` fails at inclusion, swapping `hashNode(sibling, running)` for
+`hashNode(running, sibling)` fails at inclusion, and exchanging two fields in
+`preimageOf` fails at signature.
+
 ## What this does not do
 
 - **It is not merged.** The fixture's provenance is this patch. When it lands in
@@ -131,3 +173,7 @@ caveat that the product is `slate` **with this patch applied**, not upstream.
   real handler, not by running `slate serve` and posting to it.
 - **No dashboard work.** The dashboard's export button still calls `/api/export`
   and therefore gets v2 by default; no format is displayed.
+- **The vectors now exist twice.** `tools/bundle-verify/testdata/` stays
+  authoritative for the Python cross-check and the copies in `slate` are what its
+  CI reads; a format change has to regenerate both, and the Go copy is only as
+  good as the last time someone did.

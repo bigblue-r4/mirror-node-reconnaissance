@@ -15,8 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   store — entry lines recorded through `slate add` and `slate interpose` — is
   `VERIFIED` by the independent Python verifier and committed as
   `v2-slate.ndjson`, so the format is now checked against two encoders written
-  in different languages. The patch is staged, not merged: a released slate
-  still writes v1, and `kiss-protocol` is not ported.
+  in  different languages. The patch is staged, not merged: a released slate
+  still writes v1, and `kiss-protocol` is not ported. It also carries the shared
+  vectors: `internal/bundle/testdata/` holds the six v2 fixtures and their pins,
+  and `vectors_test.go` walks §4.7 as a reader, so slate's own CI now checks the
+  format against bundles written by two other encoders — and fails at inclusion,
+  signature or scope when the leaf rule, the fold or the preimage drifts.
 - `core/bundle/` and `mnr bundle keygen` / `mnr bundle export` — the producer and
   signer for `witness-bundle/2`, which until now existed as a schema and a
   verifier only. A BLAKE3 Merkle tree with leaf-first audit paths, the §4.3
