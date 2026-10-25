@@ -1,0 +1,1522 @@
+diff --git a/README.md b/README.md
+index 5c13177..3c37fe6 100644
+--- a/README.md
++++ b/README.md
+@@ -58,7 +58,7 @@ slate intake     --case C --desc D [--cat CATEGORY] [--node NODE] [--role ROLE]
+ slate transfer   --item ID --from NODE --to NODE [--notes TEXT]
+ slate hold set   --item ID --reason TEXT
+ slate hold release --item ID
+-slate export     --case C [--sign]
++slate export     --case C [--format 2|1]
+ slate receipt    ITEM-ID [--out FILE]           # printable QR chain-of-custody receipt
+ slate audit query [--case C] [--item ID] [--type EVENT] [--role R] [--actor N] [--from DATE] [--to DATE] [--text S]
+ slate import     --file PATH [--format csv|json] [--dry-run]
+diff --git a/cmd/slate/export_integration_test.go b/cmd/slate/export_integration_test.go
+new file mode 100644
+index 0000000..4db246c
+--- /dev/null
++++ b/cmd/slate/export_integration_test.go
+@@ -0,0 +1,154 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/bigblue-r4/slate/internal/evidence"
++	slateexport "github.com/bigblue-r4/slate/internal/export"
++	"github.com/bigblue-r4/slate/internal/peer"
++)
++
++// newExportServer builds a server with two cases in its log and the node and
++// export keys set in the environment.
++func newExportServer(t *testing.T) (*server, string, string) {
++	t.Helper()
++	dir := t.TempDir()
++	ev, err := evidence.Open(dir, intKey())
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = ev.Close() })
++	if err := ev.RecordIntake(&evidence.Item{CaseNumber: "C-1", Description: "seized laptop", Category: "digital_media"}, "clerk", "evidence_clerk"); err != nil {
++		t.Fatal(err)
++	}
++	if err := ev.RecordIntake(&evidence.Item{CaseNumber: "C-1", Description: "bank statements", Category: "documents"}, "clerk", "evidence_clerk"); err != nil {
++		t.Fatal(err)
++	}
++	if err := ev.RecordIntake(&evidence.Item{CaseNumber: "C-2", Description: "unrelated"}, "clerk", "evidence_clerk"); err != nil {
++		t.Fatal(err)
++	}
++
++	nodePub, nodePriv, err := peer.GenerateNodeKey()
++	if err != nil {
++		t.Fatal(err)
++	}
++	exportPub, exportPriv, err := slateexport.GenerateKeyPair()
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv(peer.NodeKeyEnv, nodePriv)
++	t.Setenv("SLATE_SIGN_KEY", exportPriv)
++
++	srv := &server{
++		store: ev,
++		cfg:   Config{NodeID: "node-1", Department: "Honolulu PD", Agency: "Honolulu PD", Seal: "HPD-2026"},
++		dir:   dir,
++		key:   intKey(),
++	}
++	return srv, nodePub, exportPub
++}
++
++func postExport(t *testing.T, srv *server, body string) *httptest.ResponseRecorder {
++	t.Helper()
++	r := httptest.NewRequest(http.MethodPost, "/api/export", strings.NewReader(body))
++	w := httptest.NewRecorder()
++	srv.handleExport(w, r)
++	return w
++}
++
++func exportData(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
++	t.Helper()
++	if w.Code != http.StatusOK {
++		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
++	}
++	var envelope struct {
++		OK   bool           `json:"ok"`
++		Data map[string]any `json:"data"`
++	}
++	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
++		t.Fatalf("decode response: %v", err)
++	}
++	if !envelope.OK {
++		t.Fatalf("response not ok: %s", w.Body.String())
++	}
++	return envelope.Data
++}
++
++func exportedHeader(t *testing.T, path string) map[string]any {
++	t.Helper()
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	line := strings.SplitN(string(raw), "\n", 2)[0]
++	var header map[string]any
++	if err := json.Unmarshal([]byte(line), &header); err != nil {
++		t.Fatalf("decode bundle header: %v", err)
++	}
++	return header
++}
++
++func TestExportDefaultsToWitnessBundleV2(t *testing.T) {
++	srv, nodePub, exportPub := newExportServer(t)
++	data := exportData(t, postExport(t, srv, `{"case_number":"C-1"}`))
++
++	if data["format"] != "witness-bundle/2" || data["entry_count"] != float64(2) {
++		t.Fatalf("unexpected export summary: %v", data)
++	}
++	header := exportedHeader(t, data["path"].(string))
++	if header["format"] != "witness-bundle/2" {
++		t.Fatalf("format = %v", header["format"])
++	}
++	if header["entry_count"] != float64(2) {
++		t.Fatalf("entry_count = %v", header["entry_count"])
++	}
++	head := header["log_head"].(map[string]any)
++	if head["size"] != float64(3) {
++		t.Fatalf("head size = %v, want the whole log", head["size"])
++	}
++	if header["signed_by"] != exportPub {
++		t.Fatalf("signed_by = %v, want %s", header["signed_by"], exportPub)
++	}
++	if head["signer_key"] != nodePub {
++		t.Fatalf("signer_key = %v, want %s", head["signer_key"], nodePub)
++	}
++	if proofs, ok := header["proofs"].([]any); !ok || len(proofs) != 2 {
++		t.Fatalf("proofs = %v", header["proofs"])
++	}
++}
++
++func TestExportFormatOneKeepsTheLegacyPath(t *testing.T) {
++	srv, _, _ := newExportServer(t)
++	data := exportData(t, postExport(t, srv, `{"case_number":"C-1","format":1}`))
++
++	header := exportedHeader(t, data["path"].(string))
++	if _, present := header["format"]; present {
++		t.Fatalf("legacy bundle carries a format marker: %v", header["format"])
++	}
++	if header["entry_count"] != float64(2) {
++		t.Fatalf("entry_count = %v", header["entry_count"])
++	}
++}
++
++func TestExportRejectsAnUnknownFormat(t *testing.T) {
++	srv, _, _ := newExportServer(t)
++	w := postExport(t, srv, `{"case_number":"C-1","format":3}`)
++	if w.Code != http.StatusBadRequest {
++		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
++	}
++}
++
++func TestExportedFileLandsUnderExports(t *testing.T) {
++	srv, _, _ := newExportServer(t)
++	data := exportData(t, postExport(t, srv, `{"case_number":"C-1"}`))
++	path := data["path"].(string)
++	if filepath.Dir(path) != filepath.Join(srv.dir, "exports") {
++		t.Fatalf("bundle path = %s", path)
++	}
++}
+diff --git a/cmd/slate/main.go b/cmd/slate/main.go
+index 33a9103..4b68ce1 100644
+--- a/cmd/slate/main.go
++++ b/cmd/slate/main.go
+@@ -13,7 +13,7 @@
+ //	slate transfer   --item ID --from NODE --to NODE [--actor NAME] [--notes TEXT]
+ //	slate hold set   --item ID --reason TEXT [--actor NAME]
+ //	slate hold release --item ID [--actor NAME] [--notes TEXT]
+-//	slate export     --case C [--sign] [--actor NAME]
++//	slate export     --case C [--format 2|1] [--actor NAME] [--role ROLE]
+ //	slate receipt    ITEM-ID [--out FILE]
+ //	slate token add  --role ROLE --name NAME [--badge NUMBER]
+ //	slate token list
+@@ -56,6 +56,7 @@ import (
+ 	"golang.org/x/crypto/hkdf"
+ 
+ 	"github.com/bigblue-r4/slate/internal/apiwire"
++	slatebundle "github.com/bigblue-r4/slate/internal/bundle"
+ 	"github.com/bigblue-r4/slate/internal/discovery"
+ 	"github.com/bigblue-r4/slate/internal/encrypt"
+ 	"github.com/bigblue-r4/slate/internal/evidence"
+@@ -512,12 +513,16 @@ func runExport() {
+ 	caseNum := fs.String("case", "", "Case number (required)")
+ 	actor := fs.String("actor", osUser(), "Actor name for audit log")
+ 	role := fs.String("role", "", "Actor role for audit log (optional)")
+-	sign := fs.Bool("sign", false, "Sign with SLATE_SIGN_KEY env var")
++	sign := fs.Bool("sign", false, "Legacy v1 only: sign with SLATE_SIGN_KEY env var")
++	format := fs.Int("format", 2, "Bundle format: 2 = witness-bundle/2 (default), 1 = legacy v1")
+ 	jsonOut := fs.Bool("json", false, "Emit machine-readable JSON")
+ 	_ = fs.Parse(os.Args[2:])
+ 
+ 	if *caseNum == "" {
+-		usageErr(*jsonOut, "usage: slate export --case CASE [--sign] [--actor NAME] [--role ROLE]")
++		usageErr(*jsonOut, "usage: slate export --case CASE [--format 2|1] [--actor NAME] [--role ROLE]")
++	}
++	if *format != 1 && *format != 2 {
++		usageErr(*jsonOut, "usage: --format must be 2 (witness-bundle/2) or 1 (legacy v1)")
+ 	}
+ 
+ 	dir := slateDir()
+@@ -529,6 +534,62 @@ func runExport() {
+ 	if err != nil {
+ 		failCmd(*jsonOut, apiwire.CodeInternal, fmt.Sprintf("read events: %v", err))
+ 	}
++
++	if *format == 2 {
++		nodeKey, exportKey, err := exportSigningKeys(dir)
++		if err != nil {
++			failCmd(*jsonOut, apiwire.CodeBadRequest, err.Error())
++		}
++		wb, err := slatebundle.Export(slatebundle.Request{
++			Entries:    entries,
++			Scope:      slatebundle.ScopeCase,
++			CaseNumber: *caseNum,
++			Department: cfg.Department,
++			Agency:     cfg.Agency,
++			Seal:       cfg.Seal,
++			NodeID:     cfg.NodeID,
++			Actor:      *actor,
++			Role:       *role,
++		}, nodeKey, exportKey)
++		if err != nil {
++			failCmd(*jsonOut, apiwire.CodeInternal, fmt.Sprintf("generate bundle: %v", err))
++		}
++		outPath := filepath.Join(dir, "exports", wb.BundleID+".ndjson")
++		if err := wb.WriteNDJSON(outPath); err != nil {
++			failCmd(*jsonOut, apiwire.CodeInternal, fmt.Sprintf("write bundle: %v", err))
++		}
++		for _, item := range ev.GetItems(*caseNum) {
++			_ = ev.RecordExport(item.ID, *actor, *role, wb.BundleID)
++		}
++		if *jsonOut {
++			apiwire.Print(map[string]any{
++				"format":       wb.Format,
++				"bundle_id":    wb.BundleID,
++				"case_number":  wb.CaseNumber,
++				"entry_count":  wb.EntryCount,
++				"sha256_chain": wb.SHA256Chain,
++				"signed":       true,
++				"signed_by":    wb.SignedBy,
++				"head_size":    wb.LogHead.Size,
++				"head_root":    wb.LogHead.Root,
++				"path":         outPath,
++			})
++			return
++		}
++		fmt.Printf("Export bundle: %s\n", wb.BundleID)
++		fmt.Printf("  Format      : %s (scope=case, %d of %d entries)\n", wb.Format, wb.EntryCount, wb.LogHead.Size)
++		fmt.Printf("  Case        : %s\n", *caseNum)
++		fmt.Printf("  SHA-256     : %s\n", wb.SHA256Chain)
++		fmt.Printf("  Head root   : %s\n", wb.LogHead.Root)
++		fmt.Printf("  Output      : %s\n", outPath)
++		fmt.Printf("  Pin         : --pin %s", wb.SignedBy)
++		if wb.LogHead.SignerKey != wb.SignedBy {
++			fmt.Printf(" --pin %s", wb.LogHead.SignerKey)
++		}
++		fmt.Println()
++		return
++	}
++
+ 	bundle, err := slateexport.Generate(entries, *caseNum, cfg.Department, cfg.Agency, cfg.Seal, cfg.NodeID)
+ 	if err != nil {
+ 		failCmd(*jsonOut, apiwire.CodeInternal, fmt.Sprintf("generate bundle: %v", err))
+@@ -2128,7 +2189,8 @@ func (s *server) handleExport(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 	var req struct {
+ 		CaseNumber string `json:"case_number"`
+-		Sign       bool   `json:"sign"`
++		Sign       bool   `json:"sign"`   // legacy v1 only
++		Format     int    `json:"format"` // 0/2 = witness-bundle/2, 1 = legacy v1
+ 	}
+ 	if !decodeBody(w, r, &req) {
+ 		return
+@@ -2137,12 +2199,65 @@ func (s *server) handleExport(w http.ResponseWriter, r *http.Request) {
+ 		apiwire.WriteErr(w, http.StatusBadRequest, apiwire.CodeBadRequest, "case_number is required")
+ 		return
+ 	}
++	if req.Format == 0 {
++		req.Format = 2
++	}
++	if req.Format != 1 && req.Format != 2 {
++		apiwire.WriteErr(w, http.StatusBadRequest, apiwire.CodeBadRequest, "format must be 2 (witness-bundle/2) or 1 (legacy v1)")
++		return
++	}
+ 
+ 	entries, err := s.store.GetAllEvents()
+ 	if err != nil {
+ 		apiwire.WriteErr(w, http.StatusInternalServerError, apiwire.CodeInternal, "read events: "+err.Error())
+ 		return
+ 	}
++	if req.Format == 2 {
++		nodeKey, exportKey, err := exportSigningKeys(s.dir)
++		if err != nil {
++			apiwire.WriteErr(w, http.StatusBadRequest, apiwire.CodeBadRequest, err.Error())
++			return
++		}
++		actor, role := actorFrom(r), roleFrom(r)
++		wb, err := slatebundle.Export(slatebundle.Request{
++			Entries:    entries,
++			Scope:      slatebundle.ScopeCase,
++			CaseNumber: req.CaseNumber,
++			Department: s.cfg.Department,
++			Agency:     s.cfg.Agency,
++			Seal:       s.cfg.Seal,
++			NodeID:     s.cfg.NodeID,
++			Actor:      actor,
++			Role:       role,
++		}, nodeKey, exportKey)
++		if err != nil {
++			apiwire.WriteErr(w, http.StatusInternalServerError, apiwire.CodeInternal, "generate: "+err.Error())
++			return
++		}
++		outPath := filepath.Join(s.dir, "exports", wb.BundleID+".ndjson")
++		if err := wb.WriteNDJSON(outPath); err != nil {
++			apiwire.WriteErr(w, http.StatusInternalServerError, apiwire.CodeInternal, "write: "+err.Error())
++			return
++		}
++		for _, item := range s.store.GetItems(req.CaseNumber) {
++			_ = s.store.RecordExport(item.ID, actor, role, wb.BundleID)
++		}
++		s.publish()
++		apiwire.WriteOK(w, map[string]any{
++			"format":       wb.Format,
++			"bundle_id":    wb.BundleID,
++			"case_number":  wb.CaseNumber,
++			"entry_count":  wb.EntryCount,
++			"sha256_chain": wb.SHA256Chain,
++			"signed":       true,
++			"signed_by":    wb.SignedBy,
++			"head_size":    wb.LogHead.Size,
++			"head_root":    wb.LogHead.Root,
++			"path":         outPath,
++		})
++		return
++	}
++
+ 	bundle, err := slateexport.Generate(entries, req.CaseNumber, s.cfg.Department, s.cfg.Agency, s.cfg.Seal, s.cfg.NodeID)
+ 	if err != nil {
+ 		apiwire.WriteErr(w, http.StatusInternalServerError, apiwire.CodeInternal, "generate: "+err.Error())
+@@ -2530,6 +2645,28 @@ func resolveNodeKey(dir string) (ed25519.PrivateKey, string, error) {
+ 	return loadSealedNodeKey(dir)
+ }
+ 
++// exportSigningKeys returns the two keys a witness-bundle/2 export needs: the
++// node identity key, which signs the tree head, and the exporter key, which signs
++// the header. The node key is also used as the exporter key when SLATE_SIGN_KEY
++// is unset — the format permits one key for both roles, and it never lets a
++// verifier assume they differ. The legacy v1 format is the escape hatch when no
++// node key is available.
++func exportSigningKeys(dir string) (ed25519.PrivateKey, ed25519.PrivateKey, error) {
++	nodeKey, _, err := resolveNodeKey(dir)
++	if err != nil {
++		return nil, nil, fmt.Errorf("witness-bundle/2 needs the node identity key: %w "+
++			"(run `slate init`, or export with --format=1 for legacy v1)", err)
++	}
++	if h := os.Getenv("SLATE_SIGN_KEY"); h != "" {
++		exportKey, err := slateexport.DecodePrivateKey(h)
++		if err != nil {
++			return nil, nil, fmt.Errorf("SLATE_SIGN_KEY: %w", err)
++		}
++		return nodeKey, exportKey, nil
++	}
++	return nodeKey, nodeKey, nil
++}
++
+ func installSoul(dst string) error {
+ 	if _, err := os.Stat(dst); err == nil {
+ 		return nil // already present
+@@ -2680,7 +2817,7 @@ Commands:
+   transfer     --item ID --from N --to N          Transfer custody (same node)
+   hold set     --item ID --reason TEXT            Set legal hold
+   hold release --item ID                          Release legal hold
+-  export       --case C [--sign]                  Generate court export bundle
++  export       --case C [--format 2|1]            Generate court export bundle (v2 by default)
+   receipt      ITEM-ID [--out FILE]               Printable QR chain-of-custody receipt
+   audit query  [filters]                          Query the audit log
+   import       --file PATH [--dry-run]            Bulk intake from CSV/JSON (atomic)
+@@ -2701,7 +2838,7 @@ Roles: chief, evidence_clerk, tech_admin, officer, auditor
+ 
+ Environment:
+   SLATE_DIR        Override data directory (default: ~/.slate)
+-  SLATE_SIGN_KEY   Ed25519 private key hex for signing exports
++  SLATE_SIGN_KEY   Ed25519 private key hex for signing exports (v2 uses the node key when unset)
+   SLATE_NODE_KEY   Ed25519 private key hex for node identity (optional; overrides the
+                    machine-bound at-rest key created by init)
+ 
+diff --git a/docs/architecture.md b/docs/architecture.md
+index c5095bf..c6a1c43 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -11,7 +11,9 @@ cmd/slate/main.go
+ │
+ ├── internal/roles         — RBAC definitions and Can(role, perm) checks
+ ├── internal/tokens        — Token registry (tokens.json); maps token → role+name
+-├── internal/export        — Court export bundle generation and Ed25519 signing
++├── internal/export        — Legacy v1 court export bundle (--format=1)
++├── internal/bundle        — witness-bundle/2: BLAKE3 Merkle tree, preimage,
++│                            inclusion proofs, Ed25519 head and header signing
+ │   └── internal/store     — Read log entries for bundle
+ │
+ ├── internal/soul          — Identity verification (soul.toml)
+diff --git a/docs/court-export.md b/docs/court-export.md
+index 43c2fcd..9872547 100644
+--- a/docs/court-export.md
++++ b/docs/court-export.md
+@@ -2,75 +2,102 @@
+ 
+ ## Purpose
+ 
+-Court export bundles are tamper-evident packages of the complete chain of custody for a case, suitable for disclosure in legal proceedings.
++Court export bundles are tamper-evident packages of the chain of custody for a
++case, suitable for disclosure in legal proceedings.
+ 
+-## Format: NDJSON
++## Format: `witness-bundle/2` (default)
+ 
+-Bundles are written as newline-delimited JSON (one JSON object per line):
++Bundles are newline-delimited JSON: a header line, then one audit entry per line,
++exactly as the entry was written to the encrypted log.
+ 
+-- **Line 1**: Bundle header (metadata, chain hash, optional signature)
+-- **Lines 2–N**: One audit log entry per line
+-
+-## Bundle header
++The header names the format, the case, both signing keys, the node's signed tree
++head (`size`, BLAKE3 `root`, `ts`, `sig`, `signer_key`) and one Merkle inclusion
++proof per disclosed entry. Its Ed25519 signature covers a fixed line preimage, not
++the JSON encoding, so an implementation in any language can check it. The format
++is specified in `mirror-node-reconnaissance`'s `BUNDLE_SCHEMA.md` §4.
+ 
+ ```json
+ {
++  "format":       "witness-bundle/2",
+   "bundle_id":    "BUNDLE-20260512-a3b2c1d0",
+   "generated_at": "2026-05-12T14:30:00Z",
++  "scope":        "case",
+   "case_number":  "CASE-2026-0042",
+   "department":   "Honolulu PD",
+   "node_id":      "node-001",
+-  "entry_count":  7,
+-  "sha256_chain": "e3b0c44298fc1c149afbf4c…",
+-  "signature":    "<optional Ed25519 hex signature>"
++  "entry_count":  2,
++  "sha256_chain": "…",
++  "signed_by":    "<export key, 64 hex>",
++  "log_head":     {"size": 4, "root": "…", "ts": "…", "sig": "…", "signer_key": "<node key, 64 hex>"},
++  "proofs":       [{"seq": 2, "index": 1, "size": 4, "path": ["…"]}],
++  "signature":    "<Ed25519 over the §4.3 preimage>"
+ }
+ ```
+ 
+ ## Generating a bundle
+ 
+ ```bash
+-# Without signature
+ slate export --case CASE-2026-0042
+-
+-# With Ed25519 signature
+-export SLATE_SIGN_KEY=<private-key-hex>
+-slate export --case CASE-2026-0042 --sign
+ ```
+ 
+ Or from the dashboard: **Tech / Admin → Generate Court Export**.
+ 
+ Output: `~/.slate/exports/BUNDLE-YYYYMMDD-XXXXXXXX.ndjson`
+ 
+-## SHA-256 chain hash
++The node identity key signs the tree head. The header is signed with
++`SLATE_SIGN_KEY` when it is set, and with the node key otherwise — the format
++permits one key for both roles. Generate a separate export key with `slate keygen`
++and set `SLATE_SIGN_KEY=<private-key-hex>`.
+ 
+-`sha256_chain` = SHA-256 of all included entry JSON payloads, concatenated in order. Verifying this hash confirms the bundle content was not modified after generation.
++## Verifying a bundle
+ 
+-## Ed25519 signing
++A recipient needs the file and the public keys to trust, and nothing else:
+ 
+ ```bash
+-# Generate a key pair
+-slate keygen
+-# → prints public key (store in config) and private key (keep secret)
+-
+-# Export and sign
+-export SLATE_SIGN_KEY=<private-key-hex>
+-slate export --case CASE-2026-0042 --sign
++python3 tools/bundle-verify/verify_bundle.py bundle.ndjson \
++  --pin <export key> --pin <node key>
+ ```
+ 
+-The signature covers all bundle fields except the `signature` field itself (zeroed before signing). Verification:
++The verifier checks the pinned keys, the header signature, the entry count and
++digest, the head signature over `size ‖ root`, the case claim, and every inclusion
++proof. A v2 bundle cannot be assembled from entries that were never in the log:
++each proof ties the entry to the root the node signed.
+ 
+-```go
+-err := export.Verify(bundle, publicKeyHex)
+-```
++## What the signature does and does not prove
++
++It proves the disclosed entries are leaves of the tree the node signed, and that
++the named export key signed this header. It does not prove the log was complete —
++the head is minted at export time from the log on this node — and it does not
++prove the timestamps, which are self-reported. Retaining a head outside the node
++at seal time is what would make the size and root independent of the node.
++
++`sha256_chain` is SHA-256 over the disclosed entry lines. It catches corruption;
++by itself it is not an authenticity claim, because it travels inside the document
++it describes.
++
++## Legacy v1 (`--format=1`)
++
++`slate export --case C --format=1` still writes the v1 bundle: the same NDJSON
++envelope, a single signature over the JSON encoding, and no inclusion proofs. Use
++it only for a counterpart that cannot check v2 yet. `--sign` still controls
++signing on that path.
+ 
+ ## What is included
+ 
+-Only log entries with `data.case_number == <requested case>` are included. System-level events are excluded.
++Only log entries with `data.case_number == <requested case>` are included. The
++head and proofs come from the whole log, so the bundle does not reveal other
++entries — only the tree shape.
+ 
+ ## Export audit trail
+ 
+-Every `slate export` call automatically appends a `slate/export` event to the audit log for each item in the case, recording the actor name and bundle ID. The export itself is part of the custody chain.
++Every `slate export` call automatically appends a `slate/export` event to the
++audit log for each item in the case, recording the actor name and bundle ID. The
++export itself is part of the custody chain. Because those events are appended
++after the bundle is written, a later export's head covers them and the earlier
++bundle's head does not — which is what an append-only log should look like.
+ 
+ ## Retention
+ 
+-Export bundles are plain NDJSON files on disk. Back them up to a separate location as part of your evidence retention policy. The encrypted audit log is the authoritative source; bundles are derived exports from it.
++Export bundles are plain NDJSON files on disk. Back them up to a separate location
++as part of your evidence retention policy. The encrypted audit log is the
++authoritative source; bundles are derived exports from it.
+diff --git a/docs/deployment.md b/docs/deployment.md
+index 3381049..0fb5845 100644
+--- a/docs/deployment.md
++++ b/docs/deployment.md
+@@ -67,14 +67,20 @@ slate export --case CASE-2026-0042
+ # Output: ~/.slate/exports/BUNDLE-YYYYMMDD-XXXXXXXX.ndjson
+ ```
+ 
+-To sign exports:
++Exports are `witness-bundle/2` by default: the node identity key signs a Merkle
++tree head and every disclosed entry carries an inclusion proof. The header is
++signed with `SLATE_SIGN_KEY` when it is set, and with the node key otherwise.
++
++To use a separate export key:
+ ```bash
+ slate keygen                          # generate key pair
+ export SLATE_SIGN_KEY=<private-key-hex>
+-slate export --case CASE-2026-0042 --sign
+ ```
+ 
+-Store the public key in `~/.slate/config.json` under `signing_key_pub`.
++Store the public key in `~/.slate/config.json` under `signing_key_pub`, and give
++a recipient both public keys — the export key and the node's — to pin. The legacy
++v1 format is still available with `--format=1` for a counterpart that cannot check
++v2 yet.
+ 
+ ## Multi-node deployment
+ 
+diff --git a/go.mod b/go.mod
+index 9f4eea1..df6144d 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,6 +6,10 @@ require (
+ 	github.com/BurntSushi/toml v1.3.2
+ 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+ 	golang.org/x/crypto v0.19.0
++	lukechampine.com/blake3 v1.4.1
+ )
+ 
+-require golang.org/x/sys v0.17.0 // indirect
++require (
++	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
++	golang.org/x/sys v0.17.0 // indirect
++)
+diff --git a/go.sum b/go.sum
+index ad4f0ef..7092d7d 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,8 +1,12 @@
+ github.com/BurntSushi/toml v1.3.2 h1:o7IhLm0Msx3BaB+n3Ag7L8EVlByGnpq14C4YWiu/gL8=
+ github.com/BurntSushi/toml v1.3.2/go.mod h1:CxXYINrC8qIiEnFrOxCa7Jy5BFHlXnUU2pbicEuybxQ=
++github.com/klauspost/cpuid/v2 v2.0.9 h1:lgaqFMSdTdQYdZ04uHyN2d/eKdOMyi2YLSvlQIBFYa4=
++github.com/klauspost/cpuid/v2 v2.0.9/go.mod h1:FInQzS24/EEf25PyTYn52gqo7WaD8xa0213Md/qVLRg=
+ github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e h1:MRM5ITcdelLK2j1vwZ3Je0FKVCfqOLp5zO6trqMLYs0=
+ github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e/go.mod h1:XV66xRDqSt+GTGFMVlhk3ULuV0y9ZmzeVGR4mloJI3M=
+ golang.org/x/crypto v0.19.0 h1:ENy+Az/9Y1vSrlrvBSyna3PITt4tiZLf7sgCjZBX7Wo=
+ golang.org/x/crypto v0.19.0/go.mod h1:Iy9bg/ha4yyC70EfRS8jz+B6ybOBKMaSxLj6P6oBDfU=
+ golang.org/x/sys v0.17.0 h1:25cE3gD+tdBA7lp7QfhuV+rJiE9YXTcS3VG1SqssI/Y=
+ golang.org/x/sys v0.17.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
++lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
++lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
+diff --git a/internal/bundle/bundle.go b/internal/bundle/bundle.go
+new file mode 100644
+index 0000000..562c1b1
+--- /dev/null
++++ b/internal/bundle/bundle.go
+@@ -0,0 +1,401 @@
++// Package bundle writes witness-bundle/2 court exports.
++//
++// The format is specified in mirror-node-reconnaissance's BUNDLE_SCHEMA.md §4:
++// a header whose Ed25519 signature covers a fixed line-oriented preimage, a copy
++// of the node's signed tree head, and one BLAKE3 Merkle inclusion proof per
++// disclosed entry. This package is the producer only; verification is done by an
++// independent implementation, not by the code that wrote the file.
++//
++// Two keys are involved. The node's identity key signs the tree head over
++// `size_be8 || root`; the exporter's key signs the header. They may be the same
++// key, and callers commonly use the node key for both when no separate export
++// key is configured — the format never lets a verifier assume they are equal.
++//
++// The head is minted here, at export time, from the log the caller passes in. It
++// therefore says "this node signed a tree of this size and root now"; it does not
++// say the log was complete, and a node that exports a truncated log produces a
++// smaller bundle that still verifies.
++package bundle
++
++import (
++	"bytes"
++	"crypto/ed25519"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"github.com/bigblue-r4/slate/internal/store"
++)
++
++// Format is the value of the header's format field and the first line of the
++// signed preimage.
++const Format = "witness-bundle/2"
++
++// Scope says which entries a bundle discloses.
++type Scope string
++
++const (
++	// ScopeCase discloses entries whose data.case_number matches.
++	ScopeCase Scope = "case"
++	// ScopeLog discloses every entry in the log.
++	ScopeLog Scope = "log"
++)
++
++// Request is everything the caller supplies for one export.
++type Request struct {
++	Entries     []store.Entry
++	Scope       Scope
++	CaseNumber  string
++	Department  string
++	Agency      string
++	Seal        string
++	NodeID      string
++	Actor       string // export_actor, inside the signature
++	Role        string // export_role, inside the signature
++	BundleID    string // generated when empty
++	GeneratedAt time.Time
++}
++
++// LogHead is the node's signed statement about the tree it kept.
++type LogHead struct {
++	Size      uint64 `json:"size"`
++	Root      string `json:"root"`
++	TS        string `json:"ts"`
++	Sig       string `json:"sig"`
++	SignerKey string `json:"signer_key"`
++}
++
++// Proof is one entry's Merkle inclusion proof.
++type Proof struct {
++	Seq   uint64   `json:"seq"`
++	Index uint64   `json:"index"` // seq - 1
++	Size  uint64   `json:"size"`  // log_head.size
++	Path  []string `json:"path"`  // hex, leaf-first
++}
++
++// Bundle is an encoded witness-bundle/2 document.
++type Bundle struct {
++	Format      string  `json:"format"`
++	BundleID    string  `json:"bundle_id"`
++	GeneratedAt string  `json:"generated_at"`
++	Scope       string  `json:"scope"`
++	CaseNumber  string  `json:"case_number"`
++	Department  string  `json:"department"`
++	Agency      string  `json:"agency"`
++	Seal        string  `json:"seal"`
++	NodeID      string  `json:"node_id"`
++	EntryCount  int     `json:"entry_count"`
++	SHA256Chain string  `json:"sha256_chain"`
++	ExportActor string  `json:"export_actor"`
++	ExportRole  string  `json:"export_role"`
++	SignedBy    string  `json:"signed_by"`
++	LogHead     LogHead `json:"log_head"`
++	Proofs      []Proof `json:"proofs"`
++	Signature   string  `json:"signature"`
++
++	// entries holds the disclosed lines exactly as they are written out and
++	// hashed into the tree. It is unexported so the header encoding can never
++	// include them, which is what keeps the signature independent of entry count.
++	entries [][]byte
++}
++
++// Export builds and signs a bundle.
++//
++// nodeKey signs the tree head; exportKey signs the header. Both must be Ed25519
++// private keys (64 bytes). Entry lines are json.Marshal of the store entry, the
++// same bytes the store hashed when it chained them, and are never reformatted
++// afterwards.
++func Export(req Request, nodeKey, exportKey ed25519.PrivateKey) (*Bundle, error) {
++	if len(nodeKey) != ed25519.PrivateKeySize {
++		return nil, fmt.Errorf("node key must be %d bytes", ed25519.PrivateKeySize)
++	}
++	if len(exportKey) != ed25519.PrivateKeySize {
++		return nil, fmt.Errorf("export key must be %d bytes", ed25519.PrivateKeySize)
++	}
++	if req.Scope != ScopeCase && req.Scope != ScopeLog {
++		return nil, fmt.Errorf("scope must be %q or %q", ScopeCase, ScopeLog)
++	}
++	if req.Scope == ScopeCase && req.CaseNumber == "" {
++		return nil, fmt.Errorf("scope=case requires a non-empty case number")
++	}
++	if req.Scope == ScopeLog && req.CaseNumber != "" {
++		return nil, fmt.Errorf("scope=log requires an empty case number")
++	}
++	if req.GeneratedAt.IsZero() {
++		req.GeneratedAt = time.Now().UTC()
++	}
++	if req.BundleID == "" {
++		id, err := newBundleID()
++		if err != nil {
++			return nil, err
++		}
++		req.BundleID = id
++	}
++
++	generatedAt := req.GeneratedAt.UTC().Format(time.RFC3339)
++	fields := []struct {
++		name  string
++		value string
++	}{
++		{"bundle_id", req.BundleID},
++		{"generated_at", generatedAt},
++		{"case_number", req.CaseNumber},
++		{"department", req.Department},
++		{"agency", req.Agency},
++		{"seal", req.Seal},
++		{"node_id", req.NodeID},
++		{"export_actor", req.Actor},
++		{"export_role", req.Role},
++	}
++	for _, field := range fields {
++		if err := checkField(field.name, field.value); err != nil {
++			return nil, err
++		}
++	}
++	for _, field := range []struct {
++		name  string
++		value string
++	}{
++		{"bundle_id", req.BundleID},
++		{"generated_at", generatedAt},
++		{"department", req.Department},
++		{"node_id", req.NodeID},
++	} {
++		if field.value == "" {
++			return nil, fmt.Errorf("header field %s is required", field.name)
++		}
++	}
++
++	lines := make([][]byte, len(req.Entries))
++	leaves := make([][32]byte, len(req.Entries))
++	for i, entry := range req.Entries {
++		if entry.Seq != uint64(i+1) {
++			return nil, fmt.Errorf("entry %d has seq %d; a log is numbered 1..=n with no gaps",
++				i+1, entry.Seq)
++		}
++		line, err := json.Marshal(entry)
++		if err != nil {
++			return nil, fmt.Errorf("marshal entry %d: %w", entry.Seq, err)
++		}
++		lines[i] = line
++		leaves[i] = hashLeaf(line)
++	}
++
++	tree := newTree(leaves)
++	headRoot := tree.rootHash()
++	headSize := uint64(tree.size())
++
++	selected := make([]int, 0, len(req.Entries))
++	for i, entry := range req.Entries {
++		if req.Scope == ScopeLog || entryMatchesCase(entry, req.CaseNumber) {
++			selected = append(selected, i)
++		}
++	}
++
++	chain := sha256.New()
++	for _, index := range selected {
++		_, _ = chain.Write(lines[index])
++	}
++
++	proofs := make([]Proof, 0, len(selected))
++	for _, index := range selected {
++		path := tree.prove(index)
++		hexPath := make([]string, len(path))
++		for i, node := range path {
++			hexPath[i] = hex.EncodeToString(node[:])
++		}
++		proofs = append(proofs, Proof{
++			Seq:   req.Entries[index].Seq,
++			Index: req.Entries[index].Seq - 1,
++			Size:  headSize,
++			Path:  hexPath,
++		})
++	}
++
++	var headInput [40]byte
++	binary.BigEndian.PutUint64(headInput[:8], headSize)
++	copy(headInput[8:], headRoot[:])
++	headSig := ed25519.Sign(nodeKey, headInput[:])
++
++	b := &Bundle{
++		Format:      Format,
++		BundleID:    req.BundleID,
++		GeneratedAt: generatedAt,
++		Scope:       string(req.Scope),
++		CaseNumber:  req.CaseNumber,
++		Department:  req.Department,
++		Agency:      req.Agency,
++		Seal:        req.Seal,
++		NodeID:      req.NodeID,
++		EntryCount:  len(selected),
++		SHA256Chain: hex.EncodeToString(chain.Sum(nil)),
++		ExportActor: req.Actor,
++		ExportRole:  req.Role,
++		SignedBy:    hex.EncodeToString(exportKey.Public().(ed25519.PublicKey)),
++		LogHead: LogHead{
++			Size:      headSize,
++			Root:      hex.EncodeToString(headRoot[:]),
++			TS:        generatedAt,
++			Sig:       hex.EncodeToString(headSig),
++			SignerKey: hex.EncodeToString(nodeKey.Public().(ed25519.PublicKey)),
++		},
++		Proofs:  proofs,
++		entries: make([][]byte, 0, len(selected)),
++	}
++	for _, index := range selected {
++		b.entries = append(b.entries, lines[index])
++	}
++
++	preimage, err := Preimage(b)
++	if err != nil {
++		return nil, err
++	}
++	b.Signature = hex.EncodeToString(ed25519.Sign(exportKey, preimage))
++	return b, nil
++}
++
++// Bytes encodes the bundle: the header line, then each disclosed entry line.
++func (b *Bundle) Bytes() ([]byte, error) {
++	header, err := json.Marshal(b)
++	if err != nil {
++		return nil, err
++	}
++	var buf bytes.Buffer
++	buf.Write(header)
++	buf.WriteByte('\n')
++	for _, line := range b.entries {
++		buf.Write(line)
++		buf.WriteByte('\n')
++	}
++	return buf.Bytes(), nil
++}
++
++// WriteNDJSON writes the bundle to path, creating parent directories. It refuses
++// to replace an existing file: an issued bundle is evidence.
++func (b *Bundle) WriteNDJSON(path string) error {
++	data, err := b.Bytes()
++	if err != nil {
++		return err
++	}
++	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
++		return err
++	}
++	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		return err
++	}
++	if _, err := f.Write(data); err != nil {
++		_ = f.Close()
++		return err
++	}
++	if err := f.Sync(); err != nil {
++		_ = f.Close()
++		return err
++	}
++	return f.Close()
++}
++
++// Preimage returns the bytes the bundle signature covers: BUNDLE_SCHEMA.md §4.3,
++// in order, with an empty optional field still emitted as key=.
++func Preimage(b *Bundle) ([]byte, error) {
++	var out strings.Builder
++	out.WriteString(Format)
++	out.WriteByte('\n')
++	for _, field := range []string{
++		"bundle_id", "generated_at", "scope", "case_number", "department",
++		"agency", "seal", "node_id", "entry_count", "sha256_chain",
++		"export_actor", "export_role", "signed_by",
++	} {
++		var value string
++		switch field {
++		case "bundle_id":
++			value = b.BundleID
++		case "generated_at":
++			value = b.GeneratedAt
++		case "scope":
++			value = b.Scope
++		case "case_number":
++			value = b.CaseNumber
++		case "department":
++			value = b.Department
++		case "agency":
++			value = b.Agency
++		case "seal":
++			value = b.Seal
++		case "node_id":
++			value = b.NodeID
++		case "entry_count":
++			value = fmt.Sprintf("%d", b.EntryCount)
++		case "sha256_chain":
++			value = b.SHA256Chain
++		case "export_actor":
++			value = b.ExportActor
++		case "export_role":
++			value = b.ExportRole
++		case "signed_by":
++			value = b.SignedBy
++		}
++		if err := checkField(field, value); err != nil {
++			return nil, err
++		}
++		out.WriteString(field)
++		out.WriteByte('=')
++		out.WriteString(value)
++		out.WriteByte('\n')
++	}
++	out.WriteString("log_head.size=")
++	out.WriteString(fmt.Sprintf("%d", b.LogHead.Size))
++	out.WriteByte('\n')
++	for _, field := range []struct {
++		name  string
++		value string
++	}{
++		{"log_head.root", b.LogHead.Root},
++		{"log_head.ts", b.LogHead.TS},
++		{"log_head.signer_key", b.LogHead.SignerKey},
++	} {
++		if err := checkField(field.name, field.value); err != nil {
++			return nil, err
++		}
++		out.WriteString(field.name)
++		out.WriteByte('=')
++		out.WriteString(field.value)
++		out.WriteByte('\n')
++	}
++	return []byte(out.String()), nil
++}
++
++func checkField(name, value string) error {
++	if strings.ContainsAny(value, "\r\n") {
++		return fmt.Errorf("header field %s contains a line break; the signed preimage is line-oriented", name)
++	}
++	return nil
++}
++
++func entryMatchesCase(entry store.Entry, caseNumber string) bool {
++	if len(entry.Data) == 0 {
++		return false
++	}
++	var payload struct {
++		CaseNumber string `json:"case_number"`
++	}
++	if err := json.Unmarshal(entry.Data, &payload); err != nil {
++		return false
++	}
++	return payload.CaseNumber == caseNumber
++}
++
++func newBundleID() (string, error) {
++	var suffix [4]byte
++	if _, err := rand.Read(suffix[:]); err != nil {
++		return "", fmt.Errorf("bundle id: %w", err)
++	}
++	return fmt.Sprintf("BUNDLE-%s-%s", time.Now().UTC().Format("20060102"), hex.EncodeToString(suffix[:])), nil
++}
+diff --git a/internal/bundle/bundle_test.go b/internal/bundle/bundle_test.go
+new file mode 100644
+index 0000000..aa5a0b1
+--- /dev/null
++++ b/internal/bundle/bundle_test.go
+@@ -0,0 +1,330 @@
++package bundle
++
++import (
++	"crypto/ed25519"
++	"crypto/sha256"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/bigblue-r4/slate/internal/store"
++)
++
++func testKeys(t *testing.T) (ed25519.PrivateKey, ed25519.PrivateKey) {
++	t.Helper()
++	node := ed25519.NewKeyFromSeed(bytesOf('n', 32))
++	exporter := ed25519.NewKeyFromSeed(bytesOf('e', 32))
++	return node, exporter
++}
++
++func bytesOf(b byte, n int) []byte {
++	out := make([]byte, n)
++	for i := range out {
++		out[i] = b
++	}
++	return out
++}
++
++// testEntries is a seven-record log: CASE-A at seqs 2, 5 and 7, CASE-B at 1 and
++// 3, CASE-C at 4, and one record with no data at all.
++func testEntries() []store.Entry {
++	cases := map[int]string{1: "CASE-B", 2: "CASE-A", 3: "CASE-B", 4: "CASE-C", 5: "CASE-A", 7: "CASE-A"}
++	ts := time.Date(2026, 5, 12, 14, 0, 0, 0, time.UTC)
++	entries := make([]store.Entry, 7)
++	prev := strings.Repeat("0", 64)
++	for i := 1; i <= 7; i++ {
++		entry := store.Entry{
++			Seq:       uint64(i),
++			Timestamp: ts.Add(time.Duration(i) * time.Minute),
++			Level:     "INFO",
++			Event:     "slate/custody",
++			Source:    "slate",
++			PrevHash:  prev,
++		}
++		if c, ok := cases[i]; ok {
++			data, _ := json.Marshal(map[string]string{"case_number": c, "item_id": "ITEM-" + string(rune('0'+i))})
++			entry.Data = data
++		}
++		entries[i-1] = entry
++		line, _ := json.Marshal(entry)
++		sum := sha256.Sum256(line)
++		prev = hex.EncodeToString(sum[:])
++	}
++	return entries
++}
++
++func baseRequest(scope Scope) Request {
++	return Request{
++		Entries:     testEntries(),
++		Scope:       scope,
++		CaseNumber:  "",
++		Department:  "Honolulu PD",
++		Agency:      "Honolulu Police Department",
++		Seal:        "HPD-2026",
++		NodeID:      "node-001",
++		Actor:       "Sgt. Example",
++		Role:        "evidence_clerk",
++		BundleID:    "BUNDLE-20260512-a3b2c1d0",
++		GeneratedAt: time.Date(2026, 5, 12, 14, 30, 0, 0, time.UTC),
++	}
++}
++
++func TestPreimageMatchesTheSpecification(t *testing.T) {
++	root := strings.Repeat("9d2c", 16)
++	b := &Bundle{
++		Format:      Format,
++		BundleID:    "BUNDLE-20260512-a3b2c1d0",
++		GeneratedAt: "2026-05-12T14:30:00Z",
++		Scope:       "case",
++		CaseNumber:  "CASE-2026-0042",
++		Department:  "Honolulu PD",
++		Agency:      "Honolulu Police Department",
++		Seal:        "HPD-2026",
++		NodeID:      "node-001",
++		EntryCount:  7,
++		SHA256Chain: strings.Repeat("9f1c", 16),
++		ExportActor: "Sgt. Example",
++		ExportRole:  "evidence_clerk",
++		SignedBy:    strings.Repeat("3b1f", 16),
++		LogHead: LogHead{
++			Size:      41207,
++			Root:      root,
++			TS:        "2026-05-12T14:29:58Z",
++			Sig:       strings.Repeat("ff", 64),
++			SignerKey: strings.Repeat("8a01", 16),
++		},
++	}
++	want := "witness-bundle/2\n" +
++		"bundle_id=BUNDLE-20260512-a3b2c1d0\n" +
++		"generated_at=2026-05-12T14:30:00Z\n" +
++		"scope=case\n" +
++		"case_number=CASE-2026-0042\n" +
++		"department=Honolulu PD\n" +
++		"agency=Honolulu Police Department\n" +
++		"seal=HPD-2026\n" +
++		"node_id=node-001\n" +
++		"entry_count=7\n" +
++		"sha256_chain=" + strings.Repeat("9f1c", 16) + "\n" +
++		"export_actor=Sgt. Example\n" +
++		"export_role=evidence_clerk\n" +
++		"signed_by=" + strings.Repeat("3b1f", 16) + "\n" +
++		"log_head.size=41207\n" +
++		"log_head.root=" + root + "\n" +
++		"log_head.ts=2026-05-12T14:29:58Z\n" +
++		"log_head.signer_key=" + strings.Repeat("8a01", 16) + "\n"
++	got, err := Preimage(b)
++	if err != nil {
++		t.Fatalf("preimage: %v", err)
++	}
++	if string(got) != want {
++		t.Fatalf("preimage mismatch\n got:\n%s\nwant:\n%s", got, want)
++	}
++}
++
++func TestCaseBundleBindsEntriesToTheFullLog(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeCase)
++	req.CaseNumber = "CASE-A"
++	b, err := Export(req, node, exporter)
++	if err != nil {
++		t.Fatalf("export: %v", err)
++	}
++	if b.EntryCount != 3 {
++		t.Fatalf("entry_count = %d, want 3", b.EntryCount)
++	}
++	if b.LogHead.Size != 7 {
++		t.Fatalf("head size = %d, want 7", b.LogHead.Size)
++	}
++	if b.SignedBy != hex.EncodeToString(exporter.Public().(ed25519.PublicKey)) {
++		t.Fatal("signed_by is not the export key")
++	}
++	if b.LogHead.SignerKey != hex.EncodeToString(node.Public().(ed25519.PublicKey)) {
++		t.Fatal("log_head.signer_key is not the node key")
++	}
++	wantSeqs := []uint64{2, 5, 7}
++	wantIndices := []uint64{1, 4, 6}
++	for i, proof := range b.Proofs {
++		if proof.Seq != wantSeqs[i] || proof.Index != wantIndices[i] {
++			t.Fatalf("proof %d = seq %d index %d", i, proof.Seq, proof.Index)
++		}
++		if proof.Size != 7 {
++			t.Fatalf("proof %d size = %d", i, proof.Size)
++		}
++	}
++
++	// The header signature verifies over the preimage.
++	preimage, err := Preimage(b)
++	if err != nil {
++		t.Fatalf("preimage: %v", err)
++	}
++	sig, _ := hex.DecodeString(b.Signature)
++	if !ed25519.Verify(exporter.Public().(ed25519.PublicKey), preimage, sig) {
++		t.Fatal("bundle signature does not verify")
++	}
++	// The head signature verifies over size_be8 || root.
++	root, _ := hex.DecodeString(b.LogHead.Root)
++	headSig, _ := hex.DecodeString(b.LogHead.Sig)
++	var input [40]byte
++	binary.BigEndian.PutUint64(input[:8], b.LogHead.Size)
++	copy(input[8:], root)
++	if !ed25519.Verify(node.Public().(ed25519.PublicKey), input[:], headSig) {
++		t.Fatal("head signature does not verify")
++	}
++
++	// The entry lines are the store's bytes, and the digest covers exactly them.
++	data, err := b.Bytes()
++	if err != nil {
++		t.Fatalf("bytes: %v", err)
++	}
++	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
++	if len(lines) != 1+b.EntryCount {
++		t.Fatalf("encoded %d lines, want %d", len(lines), 1+b.EntryCount)
++	}
++	entries := testEntries()
++	for i, index := range []int{1, 4, 6} {
++		line, _ := json.Marshal(entries[index])
++		if lines[i+1] != string(line) {
++			t.Fatalf("entry line %d is not the store's bytes", i)
++		}
++	}
++	chain := sha256.Sum256(append([]byte(lines[1]), []byte(strings.Join(lines[2:], ""))...))
++	if b.SHA256Chain != hex.EncodeToString(chain[:]) {
++		t.Fatal("sha256_chain does not cover the entry lines")
++	}
++}
++
++func TestEveryLeafProvesToTheRoot(t *testing.T) {
++	for size := 1; size <= 9; size++ {
++		leaves := make([][32]byte, size)
++		for i := range leaves {
++			leaves[i] = hashLeaf([]byte{byte(i), 'x'})
++		}
++		tree := newTree(leaves)
++		root := tree.rootHash()
++		for index := 0; index < size; index++ {
++			path := tree.prove(index)
++			got, ok := recompute(leaves[index], index, size, path)
++			if !ok || got != root {
++				t.Fatalf("size %d index %d does not recompute the root", size, index)
++			}
++		}
++	}
++}
++
++// recompute is the verifier's rule, written independently of the producer: a
++// path of the wrong length is a failure, not a zero root.
++func recompute(h [32]byte, index, size int, path [][32]byte) ([32]byte, bool) {
++	if size == 1 {
++		return h, true
++	}
++	if len(path) == 0 {
++		return [32]byte{}, false
++	}
++	k := splitPoint(size)
++	sibling := path[len(path)-1]
++	inner := path[:len(path)-1]
++	if index < k {
++		left, ok := recompute(h, index, k, inner)
++		return hashNode(left, sibling), ok
++	}
++	right, ok := recompute(h, index-k, size-k, inner)
++	return hashNode(sibling, right), ok
++}
++
++func TestLogScopeCarriesEveryEntry(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeLog)
++	b, err := Export(req, node, exporter)
++	if err != nil {
++		t.Fatalf("export: %v", err)
++	}
++	if b.EntryCount != 7 || len(b.Proofs) != 7 {
++		t.Fatalf("entry_count = %d proofs = %d", b.EntryCount, len(b.Proofs))
++	}
++	if b.LogHead.Size != 7 {
++		t.Fatalf("head size = %d", b.LogHead.Size)
++	}
++}
++
++func TestEmptyCaseIsAnEmptyBundle(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeCase)
++	req.CaseNumber = "CASE-MISSING"
++	b, err := Export(req, node, exporter)
++	if err != nil {
++		t.Fatalf("export: %v", err)
++	}
++	if b.EntryCount != 0 || len(b.Proofs) != 0 {
++		t.Fatalf("entry_count = %d proofs = %d", b.EntryCount, len(b.Proofs))
++	}
++	if b.LogHead.Size != 7 {
++		t.Fatalf("head size = %d", b.LogHead.Size)
++	}
++	if b.SHA256Chain != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
++		t.Fatalf("empty chain = %s", b.SHA256Chain)
++	}
++}
++
++func TestRefusesValuesThatCannotBeSignedUnambiguously(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeCase)
++	req.CaseNumber = "CASE-A"
++	req.Department = "Honolulu PD\nextra=field"
++	if _, err := Export(req, node, exporter); err == nil {
++		t.Fatal("a newline in department was accepted")
++	}
++
++	req = baseRequest(ScopeCase)
++	req.CaseNumber = "CASE-A"
++	req.Actor = "Sgt.\rInjected"
++	if _, err := Export(req, node, exporter); err == nil {
++		t.Fatal("a carriage return in export_actor was accepted")
++	}
++}
++
++func TestRefusesSequenceGaps(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeLog)
++	req.Entries[2].Seq = 9
++	if _, err := Export(req, node, exporter); err == nil {
++		t.Fatal("a seq gap was accepted")
++	}
++}
++
++func TestScopeRules(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeCase)
++	if _, err := Export(req, node, exporter); err == nil {
++		t.Fatal("scope=case with no case number was accepted")
++	}
++	req = baseRequest(ScopeLog)
++	req.CaseNumber = "CASE-A"
++	if _, err := Export(req, node, exporter); err == nil {
++		t.Fatal("scope=log with a case number was accepted")
++	}
++}
++
++func TestWriteNDJSONRefusesToReplaceAnIssuedBundle(t *testing.T) {
++	node, exporter := testKeys(t)
++	req := baseRequest(ScopeCase)
++	req.CaseNumber = "CASE-A"
++	b, err := Export(req, node, exporter)
++	if err != nil {
++		t.Fatalf("export: %v", err)
++	}
++	path := filepath.Join(t.TempDir(), "exports", b.BundleID+".ndjson")
++	if err := b.WriteNDJSON(path); err != nil {
++		t.Fatalf("write: %v", err)
++	}
++	if _, err := os.Stat(path); err != nil {
++		t.Fatalf("bundle not written: %v", err)
++	}
++	if err := b.WriteNDJSON(path); err == nil {
++		t.Fatal("an existing bundle was overwritten")
++	}
++}
+diff --git a/internal/bundle/merkle.go b/internal/bundle/merkle.go
+new file mode 100644
+index 0000000..7bbd369
+--- /dev/null
++++ b/internal/bundle/merkle.go
+@@ -0,0 +1,119 @@
++package bundle
++
++// The log's Merkle tree: RFC 6962 shape over BLAKE3, with the entry line's bytes
++// as the leaf preimage.
++//
++//	leaf = BLAKE3(0x00 || line)
++//	node = BLAKE3(0x01 || left || right)
++//
++// The split point for a subtree of n leaves is the largest power of two strictly
++// less than n, matching the witness core's merkle package. Audit paths are
++// leaf-first: the innermost sibling is first and the root's sibling is last,
++// which is the order witness-bundle/2 carries.
++
++import "lukechampine.com/blake3"
++
++const (
++	leafPrefix = byte(0x00)
++	nodePrefix = byte(0x01)
++)
++
++func hashLeaf(line []byte) [32]byte {
++	h := blake3.New(32, nil)
++	_, _ = h.Write([]byte{leafPrefix})
++	_, _ = h.Write(line)
++	var out [32]byte
++	copy(out[:], h.Sum(nil))
++	return out
++}
++
++func hashNode(left, right [32]byte) [32]byte {
++	h := blake3.New(32, nil)
++	_, _ = h.Write([]byte{nodePrefix})
++	_, _ = h.Write(left[:])
++	_, _ = h.Write(right[:])
++	var out [32]byte
++	copy(out[:], h.Sum(nil))
++	return out
++}
++
++// splitPoint returns the largest power of two strictly less than n, for n > 1.
++func splitPoint(n int) int {
++	k := 1
++	for k < n {
++		k <<= 1
++	}
++	return k >> 1
++}
++
++// tree is a built Merkle tree. Building once makes an audit path O(log n)
++// instead of recomputing sibling subtrees per proof.
++type tree struct {
++	root *treeNode
++}
++
++type treeNode struct {
++	hash        [32]byte
++	count       int
++	left, right *treeNode
++}
++
++func newTree(leaves [][32]byte) *tree {
++	if len(leaves) == 0 {
++		return &tree{}
++	}
++	return &tree{root: buildTree(leaves)}
++}
++
++func buildTree(leaves [][32]byte) *treeNode {
++	if len(leaves) == 1 {
++		return &treeNode{hash: leaves[0], count: 1}
++	}
++	k := splitPoint(len(leaves))
++	left := buildTree(leaves[:k])
++	right := buildTree(leaves[k:])
++	return &treeNode{
++		hash:  hashNode(left.hash, right.hash),
++		count: left.count + right.count,
++		left:  left,
++		right: right,
++	}
++}
++
++func (t *tree) size() int {
++	if t.root == nil {
++		return 0
++	}
++	return t.root.count
++}
++
++func (t *tree) rootHash() [32]byte {
++	if t.root == nil {
++		return [32]byte{}
++	}
++	return t.root.hash
++}
++
++// prove returns the leaf-first audit path for index, or nil if the index is
++// outside the tree.
++func (t *tree) prove(index int) [][32]byte {
++	if t.root == nil || index < 0 || index >= t.root.count {
++		return nil
++	}
++	var path [][32]byte
++	collectPath(t.root, index, &path)
++	return path
++}
++
++func collectPath(n *treeNode, index int, path *[][32]byte) {
++	if n.left == nil || n.right == nil {
++		return
++	}
++	if index < n.left.count {
++		collectPath(n.left, index, path)
++		*path = append(*path, n.right.hash)
++		return
++	}
++	collectPath(n.right, index-n.left.count, path)
++	*path = append(*path, n.left.hash)
++}
+diff --git a/internal/export/export.go b/internal/export/export.go
+index b95e088..5e75fa7 100644
+--- a/internal/export/export.go
++++ b/internal/export/export.go
+@@ -56,21 +56,30 @@ func Generate(entries []store.Entry, caseNumber, department, agency, seal, nodeI
+ 	}, nil
+ }
+ 
+-// Sign signs the bundle with the given Ed25519 private key (128-hex-char string).
+-func Sign(b *Bundle, privKeyHex string) error {
++// DecodePrivateKey parses an Ed25519 private key from hex (128 characters).
++func DecodePrivateKey(privKeyHex string) (ed25519.PrivateKey, error) {
+ 	privBytes, err := hex.DecodeString(privKeyHex)
+ 	if err != nil {
+-		return fmt.Errorf("decode private key: %w", err)
++		return nil, fmt.Errorf("decode private key: %w", err)
+ 	}
+ 	if len(privBytes) != ed25519.PrivateKeySize {
+-		return fmt.Errorf("private key must be %d bytes (%d hex chars)",
++		return nil, fmt.Errorf("private key must be %d bytes (%d hex chars)",
+ 			ed25519.PrivateKeySize, ed25519.PrivateKeySize*2)
+ 	}
++	return ed25519.PrivateKey(privBytes), nil
++}
++
++// Sign signs the bundle with the given Ed25519 private key (128-hex-char string).
++func Sign(b *Bundle, privKeyHex string) error {
++	priv, err := DecodePrivateKey(privKeyHex)
++	if err != nil {
++		return err
++	}
+ 	payload, err := bundlePayload(b)
+ 	if err != nil {
+ 		return err
+ 	}
+-	b.Signature = hex.EncodeToString(ed25519.Sign(ed25519.PrivateKey(privBytes), payload))
++	b.Signature = hex.EncodeToString(ed25519.Sign(priv, payload))
+ 	return nil
+ }
+ 

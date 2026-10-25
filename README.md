@@ -157,6 +157,11 @@ an existing key or bundle: an issued bundle is evidence, so a new export gets a
 new path. `--scope log` discloses the whole log; `--scope case` discloses only
 the matching entries, with proofs taken from the full tree.
 
+The producer is no longer only Rust. [`tools/slate-v2-port/`](tools/slate-v2-port/)
+contains the same format implemented behind `slate`'s own court-export command,
+which now emits v2 by default there; its bundle is checked by the Python verifier
+like any other producer's, so two independent encoders are under test at once.
+
 ## Verification, measured
 
 Third-party checking is the product, so it is stated as results rather than as
@@ -172,6 +177,7 @@ BLAKE3 and Ed25519 included — so it shares nothing with the Go encoders.
 | `witness-bundle/2`, `scope=case` / `scope=log` / 7-leaf | `VERIFIED` — 4,301 / 5,895 / 3,560 B |
 | Bundle written by `mnr bundle export` (Rust), 12-entry log | `VERIFIED` — 5,895 B; root, `sha256_chain` and all 12 proof paths identical to the Go-produced fixture over the same entry lines |
 | Same producer, `scope=case`, 3 of 7 entries | `VERIFIED` — 2,052 B; proof indices 1, 4, 6 at seqs 2, 5, 7 |
+| `slate export` (Go, v2 by default with the port applied), 2 of 4 entries | `VERIFIED` — 2,087 B; house node and exporter keys both pinned |
 | One bundle per log size 1…8 | All `VERIFIED`, with audit paths of 0–3 hashes |
 | Forged-but-signed bundles, 10 controls | Each rejected at the step that should catch it — `inclusion`, `proofs`, `scope`, `head`, `preimage` — and two honest signed controls that must verify |
 
@@ -214,10 +220,10 @@ than "tamper-proof". This section is the short version of
   whole log. Feed it a truncated log and it produces a smaller, valid bundle. A
   head retained outside the node at seal time is what would make the size and
   root independent of the node; that step is still missing.
-- **The stores still write v1.** The producer reads a whole-log NDJSON in the
-  store shape; `slate` and `kiss-protocol` are not wired to it yet. Their port is
-  the Go `bundle` package in [BUNDLE_SCHEMA.md](BUNDLE_SCHEMA.md) §7, and until
-  that lands their bundles remain v1.
+- **The store port is staged, not merged.** [`tools/slate-v2-port/`](tools/slate-v2-port/)
+  holds a working patch against `slate` at `c198ce0` that makes `slate export`
+  write v2 by default (`--format v1` still available); it is not upstream, so a
+  released slate still writes v1. `kiss-protocol` is not ported at all.
 - **Aggregation is local, not a portable proof.** `mnr sparkle verify` needs the
   whole probe directory tree, and the root commits to fragment hashes rather
   than to plaintext.
@@ -269,7 +275,8 @@ with no implementation for the same reason.
 | Bundle producer and signer | `core/bundle/` | **Code** — `witness-bundle/2` header, preimage, Merkle proofs, Ed25519 signing |
 | CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle`, `ledger verify`, `ledger show`, `bundle keygen`, `bundle export` |
 | Court-export format | `BUNDLE_SCHEMA.md` | **Specification** — implemented by `mnr bundle export`; v1 bundles still verify |
-| Independent bundle verifier | `tools/bundle-verify/` | **Code** — Python, no dependencies, 49 tests |
+| Independent bundle verifier | `tools/bundle-verify/` | **Code** — Python, no dependencies, 50 tests |
+| slate v2 export port | `tools/slate-v2-port/` | **Patch** — applies to `slate@c198ce0`; not upstream |
 | A model backend | — | **Not included** — the `Engine` trait is the seam |
 | A real swarm connector | — | **Not included** — one implementation exists |
 | Interception / dialect shaping | `proxy/` | **Concept only** — [`proxy/README.md`](proxy/README.md) |

@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `tools/slate-v2-port/` — the `witness-bundle/2` producer ported behind
+  `slate`'s own court-export command, as a ready-to-apply patch against
+  `slate@c198ce0`. `slate export` now writes v2 by default (`--format v1` keeps
+  the old output one flag away) and reads the node and exporter keys from
+  slate's key store instead of minting them. The bundle it issues over a live
+  store — entry lines recorded through `slate add` and `slate interpose` — is
+  `VERIFIED` by the independent Python verifier and committed as
+  `v2-slate.ndjson`, so the format is now checked against two encoders written
+  in different languages. The patch is staged, not merged: a released slate
+  still writes v1, and `kiss-protocol` is not ported.
 - `core/bundle/` and `mnr bundle keygen` / `mnr bundle export` — the producer and
   signer for `witness-bundle/2`, which until now existed as a schema and a
   verifier only. A BLAKE3 Merkle tree with leaf-first audit paths, the §4.3
@@ -20,7 +30,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sha256_chain` and all 12 proof paths are identical, and the independent
   Python verifier reports `VERIFIED` for that bundle and for a filtered
   case-scoped one. 20 crate tests and 2 CLI integration tests; the Python suite
-  is now 49.
+  is now 50.
 - `CONSOLIDATION.md` — a cross-repository decision document: the map of the
   witness-log implementations (including two vendored copies) and the
   applications built on them, an ordered proposal to extract one importable core
@@ -51,9 +61,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shapes, and — in rehearsal — one bundle per log size from 1 to 8 records; it
   reports an unsigned v1 bundle as `UNAUTHENTICATED` (exit 3) rather than
   verified, and rejects forged-but-signed bundles at the step that catches each.
-  49 tests, with the bundles kept as frozen vectors. It is a cross-check of an
-  external format, not a component of this system, and it now checks two bundles
-  written by the producer below.
+  50 tests, with the bundles kept as frozen vectors. It is a cross-check of an
+  external format, not a component of this system, and it now checks bundles
+  written by two producers.
 - `mnr sparkle verify [--dir <path>]` — recomputes the aggregation from the probe
   ledgers and checks it against the sealed aggregate chain, exiting nonzero on
   any disagreement. `mnr sparkle` now runs the same verification and inherits its

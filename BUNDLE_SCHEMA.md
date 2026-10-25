@@ -480,7 +480,14 @@ Consumers:
 - **`slate`** stops owning `internal/export`. Its `export`, dashboard and API paths
   call `bundle.Sign`/`Encode`; `slate verify-bundle` and the dashboard gain a
   verify view that calls `bundle.Verify`. The local `verify` subcommand keeps
-  checking the store, which is a different question.
+  checking the store, which is a different question. **Rehearsed, not applied:**
+  `tools/slate-v2-port/` in this repository holds a patch against `slate@c198ce0`
+  that does the export half — `internal/bundle`, v2 by default in the CLI and
+  `/api/export`, `--format 1` as the escape hatch — and it issues
+  `tools/bundle-verify/testdata/v2-slate.ndjson`, the first v2 bundle written by
+  a product's own export path. Its package is deliberately self-contained
+  (`internal/store` plus BLAKE3) so that it can move into the module below
+  unchanged; until then a released `slate` still writes v1.
 - **`kiss-protocol`** keeps `cmd/witness` and `store.Export`/`VerifyExport`;
   `internal/pd/export` is deleted with the `witness-pd` retirement (P0-3's second
   half).

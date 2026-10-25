@@ -383,6 +383,18 @@ class V2Tests(unittest.TestCase):
         self.assertEqual([proof["seq"] for proof in result.header["proofs"]],
                          [2, 5, 7])
 
+    def test_slate_issued_bundle_verifies(self):
+        # Written by slate v1.5.0 with the producer patch in tools/slate-v2-port:
+        # two entries out of a four-record log, distinct node and export keys.
+        result = vb.verify(fixture("v2-slate.ndjson"),
+                           pins("v2-slate.export.pub", "v2-slate.node.pub"))
+        self.assertEqual(result.status, "VERIFIED")
+        self.assertEqual(result.entries, 2)
+        self.assertEqual(result.header["log_head"]["size"], 4)
+        self.assertEqual([proof["seq"] for proof in result.header["proofs"]], [2, 3])
+        self.assertNotEqual(result.header["signed_by"],
+                            result.header["log_head"]["signer_key"])
+
     def test_unknown_header_keys_are_ignored(self):
         # The rehearsal prototype still emitted v1's "entries":null placeholder.
         # Unknown keys are outside the preimage, so the bundle must still pass.

@@ -123,21 +123,24 @@ throwaway and the records are fictional.
 | `v2-seven.ndjson` | scratch emitter, §4 | 3,560 B | a 4+3 split whose right subtree splits again; 3-hash paths |
 | `v2-rust-log.ndjson` | `mnr bundle export` (Rust) | 5,895 B | the same 12 entry lines as `v2-log.ndjson`; root, chain and proofs must match it |
 | `v2-rust-case.ndjson` | `mnr bundle export` (Rust) | 2,052 B | 3 entries out of 7 at seqs 2, 5, 7; indices 1, 4, 6 |
+| `v2-slate.ndjson` | `slate export` (Go, `tools/slate-v2-port`; v2 is the default there) | 2,087 B | 2 entries out of 4 from the product's own store; distinct node and exporter keys, both pinned |
 
 The three scratch-emitter files were written by a Go program built from §4
 alone, then deleted; the bundles and their public keys are kept as frozen
 vectors. The two `v2-rust-*` files were written by the committed Rust producer;
 the keys for that run were generated in `/tmp` and discarded, so only the public
-halves are kept. Regenerate a fixture when the format changes — do not hand-edit
-one, because a fixture that no longer matches what a producer writes is a test
-that proves nothing.
+halves are kept. `v2-slate.ndjson` comes from slate's real export path with the
+default format flipped to v2, driven through `slate add` and `slate interpose`
+rather than a fixture reader. Regenerate a fixture when the format changes — do
+not hand-edit one, because a fixture that no longer matches what a producer
+writes is a test that proves nothing.
 
 ## Tests
 
 ```console
 $ python3 -m unittest discover -s tools/bundle-verify -v
 ...
-Ran 49 tests in 0.8s
+Ran 50 tests in 0.9s
 OK
 ```
 
