@@ -7,10 +7,13 @@
 //!   sparkle verify  Recompute the aggregation and check it against the sealed chain.
 //!   ledger verify   Verify the integrity of a witness log on disk.
 //!   ledger show     Print a short summary of a witness log.
+//!   bundle keygen   Mint an Ed25519 seed file for the node or the exporter.
+//!   bundle export   Write a witness-bundle/2 for a whole-log file.
 //!
 //! The demo is fully lab-contained: the only swarm it can talk to is the
 //! in-process `mnr-sim` mock. See AUTHORIZATION.md.
 
+mod bundle;
 mod config;
 mod sparkle;
 
@@ -27,6 +30,7 @@ fn main() {
         Some("demo") => cmd_demo(&args[1..]),
         Some("sparkle") => cmd_sparkle(&args[1..]),
         Some("ledger") => cmd_ledger(&args[1..]),
+        Some("bundle") => bundle::cmd_bundle(&args[1..]),
         Some("help") | Some("-h") | Some("--help") | None => {
             print_help();
             0
@@ -49,7 +53,12 @@ fn print_help() {
          mnr sparkle [--probes N] [--ttl-ms MS] [--dir <path>]   Run the multi-probe sparkle demo\n  \
          mnr sparkle verify [--dir <path>]   Recompute the aggregation from the probe ledgers and check the sealed chain\n  \
          mnr ledger verify [--dir <path>] Verify a witness log's integrity\n  \
-         mnr ledger show   [--dir <path>] Summarize a witness log\n\n\
+         mnr ledger show   [--dir <path>] Summarize a witness log\n  \
+         mnr bundle keygen --out <file>  Mint an Ed25519 seed for the node or the exporter\n  \
+         mnr bundle export --log <entries.ndjson> --out <bundle.ndjson>\n    \
+             --scope <case|log> --node-key <file> --exporter-key <file>\n    \
+             --department <name> --node-id <id> [--case <number>]\n    \
+             [--agency <name>] [--seal <id>] [--actor <who>] [--role <role>]\n\n\
          Config: env MNR_* > configs/mnr.toml > defaults (see configs/mnr.toml.example)."
     );
 }
