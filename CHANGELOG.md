@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-26
+
+The court-export format gets its second version, a verifier written independently
+of every producer, and a producer in a second repository. Two design documents
+came out of the work — a consolidation plan across the repositories that hold a
+witness log, and an extraction plan for the shared core — both unexecuted. The
+verifier now runs in CI rather than by hand.
+
+Breaking: aggregations produced by 0.1.0 no longer verify. The fragment hash
+layout and the committed aggregate payloads both changed.
+
 ### Added
 - `tools/slate-v2-port/` — the `witness-bundle/2` producer ported behind
   `slate`'s own court-export command, as a ready-to-apply patch against
@@ -97,37 +108,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exist, so it only ever promised a run that could not happen.
 
 ### Changed
-- `Cargo.toml`'s `repository` is now `bigblue-r4/mirror-node-reconnaissance`,
-  the repository these commits are in. It named an `SGAIL` URL that resolves to
-  nothing public, and no crate inherited it, so `cargo metadata` reported each
-  package's home as unknown. All six crates now declare
-  `repository.workspace = true` and report the real URL.
-
-### Fixed
-- Sparkle verification previously trusted `aggregate-root.json`, which was not
-  part of any sealed chain, and never recomputed the root. It now recomputes the
-  fragment hashes and root from the probe ledgers and compares them against the
-  sealed chain; the export copy is reported but never trusted.
-- An unsealed probe ledger is refused during aggregation instead of being included
-  as a fragment, and a failed seal now aborts the probe.
-- Probe ordering for the Merkle root is by numeric probe id, not directory
-  iteration order, so the root is reproducible.
-- `hash_ledger_fragment` no longer concatenates the log and anchor without a
-  separator (domain-separated and length-prefixed).
-- Aggregate entries no longer carry self-reported run statistics (drift, steps,
-  trip reason), which made them impossible to verify.
-- **Witness-log integrity.** `Ledger::seal()` now creates `log-head.json` with
-  `create_new` and never rewrites it, and `Ledger::open()` checks an existing
-  anchor against the chain before appending, then refuses a sealed directory.
-  Truncating a log and re-running the node no longer re-anchors the shortened
-  chain. Entries are `sync_data`'d and the anchor is `sync_all`'d, so a durable
-  anchor cannot outrun the log it describes.
-- `mnr ledger verify` reports an unsealed log as `UNSEALED` and exits nonzero
-  instead of printing `OK`; truncation is only detectable against an anchor.
-- `kind` tags are restricted to `[A-Za-z0-9._-]{1,64}`, so a caller-supplied tag
-  cannot break the newline-delimited hash preimage.
-
-### Changed
 - **README repositioned around the witness log — the product — instead of the
   swarm lab.** It leads with what the log answers, then with the two deployments
   it was built for: a poultry house (restart catch-up, a silent-house alarm, a
@@ -163,12 +143,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   around what the code does, with a dual-use/misuse section and a "what this does
   not show" section, and drops the grant-showcase framing and the
   production-use claim. ARCHITECTURE recorded that the Verifier role was not
-  given the Proposer's output (since closed — see the first entry in this
-  section), that `MockEngine` drift is marker arithmetic, that only the friction
+  given the Proposer's output(since closed — see the `VerifierContext` entry under Added and the audit entry under Changed), that `MockEngine` drift is marker arithmetic, that only the friction
   variables fail closed, and that the reaper does not touch the connector. THREAT_MODEL withdraws the evidentiary claim, scopes the drift
   mitigation, and adds a dual-use risk section. AUTHORIZATION adds an
   availability-impact cap and the private reporting channel; `proxy/README.md`
   drops proposal framing and shows the current `SwarmConnector` signature.
+- `Cargo.toml`'s `repository` is now `bigblue-r4/mirror-node-reconnaissance`,
+  the repository these commits are in. It named an `SGAIL` URL that resolves to
+  nothing public, and no crate inherited it, so `cargo metadata` reported each
+  package's home as unknown. All six crates now declare
+  `repository.workspace = true` and report the real URL.
+
+### Fixed
+- Sparkle verification previously trusted `aggregate-root.json`, which was not
+  part of any sealed chain, and never recomputed the root. It now recomputes the
+  fragment hashes and root from the probe ledgers and compares them against the
+  sealed chain; the export copy is reported but never trusted.
+- An unsealed probe ledger is refused during aggregation instead of being included
+  as a fragment, and a failed seal now aborts the probe.
+- Probe ordering for the Merkle root is by numeric probe id, not directory
+  iteration order, so the root is reproducible.
+- `hash_ledger_fragment` no longer concatenates the log and anchor without a
+  separator (domain-separated and length-prefixed).
+- Aggregate entries no longer carry self-reported run statistics (drift, steps,
+  trip reason), which made them impossible to verify.
+- **Witness-log integrity.** `Ledger::seal()` now creates `log-head.json` with
+  `create_new` and never rewrites it, and `Ledger::open()` checks an existing
+  anchor against the chain before appending, then refuses a sealed directory.
+  Truncating a log and re-running the node no longer re-anchors the shortened
+  chain. Entries are `sync_data`'d and the anchor is `sync_all`'d, so a durable
+  anchor cannot outrun the log it describes.
+- `mnr ledger verify` reports an unsealed log as `UNSEALED` and exits nonzero
+  instead of printing `OK`; truncation is only detectable against an anchor.
+- `kind` tags are restricted to `[A-Za-z0-9._-]{1,64}`, so a caller-supplied tag
+  cannot break the newline-delimited hash preimage.
 
 ## [0.1.0] — 2026-09-21
 
@@ -202,5 +210,6 @@ reconnaissance built on SGAIL's split-brain and witness-layer tech.
   mechanics are documented, not implemented. Any real-world use is gated by
   `AUTHORIZATION.md`.
 
-[Unreleased]: https://github.com/bigblue-r4/mirror-node-reconnaissance/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bigblue-r4/mirror-node-reconnaissance/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bigblue-r4/mirror-node-reconnaissance/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bigblue-r4/mirror-node-reconnaissance/releases/tag/v0.1.0

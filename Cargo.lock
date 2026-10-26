@@ -238,7 +238,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mnr-bundle"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "mnr-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mnr-bundle",
  "mnr-ledger",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "mnr-ledger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "mnr-observer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mnr-ledger",
  "mnr-reaper",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "mnr-reaper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mnr-ledger",
  "serde",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "mnr-sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mnr-observer",
 ]
