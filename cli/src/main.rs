@@ -378,8 +378,11 @@ fn print_sparkle_report(report: &sparkle::VerifyReport) {
             eprintln!("  - {error}");
         }
     }
+    // For a pre-0.2.0 aggregate the exported root legitimately differs from the
+    // recomputed one, and the explanation above already says so. Repeating it as
+    // a warning reads like a second, unrelated finding.
     if let Some(exported) = &report.exported_root {
-        if exported != root {
+        if !report.legacy_layout && exported != root {
             eprintln!(
                 "  warning: aggregate-root.json claims {exported}…, which is not the root recomputed from the chain"
             );

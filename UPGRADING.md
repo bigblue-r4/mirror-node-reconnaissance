@@ -66,27 +66,28 @@ fragment hash and the aggregate ledger changed during 0.2.0's development:
   so verification trusts the chain and treats that file as an exported copy.
 
 An aggregate archived from one of those commits fails `mnr sparkle verify`, and
-the failure names the format rather than an attack:
+the failure says which layout it is in rather than listing a mismatch per probe
+— four findings that all have one cause read like four problems:
 
 ```
 $ mnr sparkle verify --dir ./sparkle-old
-SPARKLE VERIFY FAILED: probes_verified=2 all_probes_ok=true aggregate_ok=false sealed=true
-  - aggregate ledger holds 2 entries; expected 2 probes + 1 root
-  - expected exactly one sparkle-root entry, found 0
-  - probe 0: committed fragment does not match the probe ledger (seq 0)
-  - probe 1: committed fragment does not match the probe ledger (seq 1)
-  warning: aggregate-root.json claims 6314d7bd…, which is not the root recomputed from the chain
+SPARKLE VERIFY FAILED: probes_verified=2 all_probes_ok=true aggregate_ok=false sealed=true recomputed_root=b28916f8cdeff5eb…
+  - aggregate is in the pre-0.2.0 layout: 2 fragment entries, no sparkle-root entry, and an exported root 6314d7bddf327f55… that matches the old fragment hash (sha256(ledger.jsonl + log-head.json)) — it predates the root being committed to the chain
+  - its per-probe entries committed self-reported runtime statistics and a fragment hash that binds neither file, so they cannot be rechecked; it is not evidence this build can verify — regenerate it into a fresh directory with `mnr sparkle --dir <new dir>`
 ```
 
-A missing `sparkle-root` entry and every fragment mismatched, while the probe
-ledgers verified and the aggregate chain is intact, is the signature of the old
-layout — not of a truncated or rewritten aggregate. Regenerate it rather than
-keep it: `mnr sparkle` into a fresh `--dir`, then `mnr sparkle verify`.
+The aggregate still fails: recognising the layout does not make it verify. The
+recognition is positive rather than by elimination — one fragment entry per
+probe, no root entry, *and* an exported root that matches the root recomputed
+with the old fragment hash. An aggregate whose root entry was deleted or
+altered, or whose probe ledger was swapped, therefore still reports the mismatch
+or the missing root, and is not excused as old. A probe ledger also still has to
+verify on its own before any of this is said.
 
-One caveat worth knowing when you compare old and new artifacts: nothing in
-them says which layout they use. The domain strings say `/v1` on both sides of
-the change, and the aggregate ledger's `kind` tag stayed `sparkle-fragment`, so
-inspection cannot date an aggregate — only verifying it can.
+Regenerate a legacy aggregate rather than keep it: `mnr sparkle` into a fresh
+`--dir`, then `mnr sparkle verify`. Old and new artifacts do not say which
+layout they use — the domain strings say `/v1` on both sides of the change and
+the `kind` tag stayed `sparkle-fragment` — so verification is what dates one.
 
 ### Bundles: nothing to re-sign
 
@@ -103,5 +104,6 @@ by `tools/bundle-verify/`; `slate export --format 1` still writes them.
 | 0.1.0 re-anchored a sealed directory | Ran 0.1.0's `mnr demo` against its own sealed `--dir`: 81 → 162 entries, `log-head.json` rewritten, exit 0 |
 | 0.2.0 refuses and writes nothing | Ran the 0.2.0 `mnr demo` against a copy of that sealed directory: exit 1, `ledger.jsonl` and `log-head.json` byte-identical afterwards |
 | 0.1.0 had no aggregation or bundle | Built `v0.1.0` prints its own usage: `demo`, `ledger verify`, `ledger show` only |
-| Old aggregates fail, and how | Built `92cb930` (sparkle, before the chain and preimage change), produced an aggregate with it, verified it with the 0.2.0 binary: exit 1, four errors — no `sparkle-root` entry, both committed fragments mismatched, and `aggregate-root.json` disagreeing with the recomputed root |
+| Old aggregates fail, and how | Built `92cb930` (sparkle, before the chain and preimage change), produced an aggregate with it, verified it with the 0.2.0 binary: exit 1, two lines naming the pre-0.2.0 layout and pointing at a fresh run |
+| The layout is recognised, not guessed | Two CLI tests: a rewritten pre-0.2.0 aggregate is explained once with no per-probe mismatch lines; the same shape with a foreign exported root is not explained, and still reports the missing root |
 | The aggregate changes are as described | Compared `cli/src/sparkle.rs` at `92cb930` with the current file: fragment hash and committed payload, as listed above |

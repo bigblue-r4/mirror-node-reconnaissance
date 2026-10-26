@@ -260,6 +260,20 @@ fn hash_ledger_fragment(ledger_dir: &Path) -> Result<String, String> {
     Ok(hex(&h.finalize()))
 }
 
+/// The fragment hash as 0.2.0's predecessor computed it: `SHA-256(log ‖ head)`,
+/// the two files concatenated with no separator and no length.
+///
+/// This exists only to *recognise* an aggregate written in the old layout, so a
+/// reader gets one explanation instead of a mismatch per probe. Nothing is ever
+/// verified with it — that both files could shift bytes into one another is why
+/// the format changed.
+fn legacy_fragment_hash(ledger_dir: &Path) -> Result<String, String> {
+    let mut combined = fs::read(ledger_dir.join("ledger.jsonl")).map_err(|e| e.to_string())?;
+    combined
+        .extend_from_slice(&fs::read(ledger_dir.join("log-head.json")).map_err(|e| e.to_string())?);
+    Ok(sha256_hex(&combined))
+}
+
 /// Probe directories under `<root>/probes`, ordered by numeric probe id so the
 /// Merkle root does not depend on directory iteration order.
 fn probe_dirs(root: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
@@ -598,6 +612,7 @@ pub fn verify_sparkle_aggregation(dir: &str) -> VerifyReport {
     let agg_dir = root_dir.join("aggregate");
     let mut sealed = false;
     let mut aggregate_ok = false;
+    let mut legacy_layout = false;
     match Ledger::verify(&agg_dir) {
         Err(e) => errors.push(format!("aggregate ledger: {e}")),
         Ok(report) if !report.sealed => {
@@ -607,15 +622,21 @@ pub fn verify_sparkle_aggregation(dir: &str) -> VerifyReport {
             sealed = true;
             match Ledger::read_entries(&agg_dir) {
                 Err(e) => errors.push(format!("aggregate ledger: {e}")),
-                Ok(entries) => {
-                    aggregate_ok = check_committed_entries(
-                        &entries,
-                        &probes,
-                        &fragment_hashes,
-                        &derived_root,
-                        &mut errors,
-                    );
-                }
+                Ok(entries) => match legacy_layout_explanation(&entries, &probes, &agg_dir) {
+                    Some(explanation) => {
+                        legacy_layout = true;
+                        errors.extend(explanation);
+                    }
+                    None => {
+                        aggregate_ok = check_committed_entries(
+                            &entries,
+                            &probes,
+                            &fragment_hashes,
+                            &derived_root,
+                            &mut errors,
+                        );
+                    }
+                },
             }
         }
     }
@@ -632,8 +653,59 @@ pub fn verify_sparkle_aggregation(dir: &str) -> VerifyReport {
         aggregation_root: derived_root,
         exported_root,
         sealed,
+        legacy_layout,
         errors,
     }
+}
+
+/// Explain an aggregate written before the root and the fragment payload were
+/// committed to the chain, rather than reporting a mismatch per probe.
+///
+/// Detection is positive, not merely "there is no root entry": the chain must
+/// hold exactly one fragment entry per probe, and its exported root must equal
+/// the root recomputed with the *old* fragment hash. So a 0.2.0 aggregate whose
+/// root entry was deleted or altered is still reported as damaged, and a
+/// rewritten probe ledger is still reported as a mismatch.
+fn legacy_layout_explanation(
+    entries: &[LedgerEntry],
+    probes: &[(u32, PathBuf)],
+    agg_dir: &Path,
+) -> Option<[String; 2]> {
+    if entries.is_empty()
+        || entries.len() != probes.len()
+        || entries.iter().any(|e| e.kind != "sparkle-fragment")
+    {
+        return None;
+    }
+
+    let mut legacy_hashes = Vec::with_capacity(probes.len());
+    for (_, path) in probes {
+        legacy_hashes.push(legacy_fragment_hash(path).ok()?);
+    }
+    let legacy_root = compute_merkle_root(&legacy_hashes);
+
+    let exported_root = fs::read_to_string(agg_dir.join("aggregate-root.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|meta| meta["aggregation_root"].as_str().map(str::to_string))?;
+    if exported_root != legacy_root {
+        return None;
+    }
+
+    Some([
+        format!(
+            "aggregate is in the pre-0.2.0 layout: {} fragment entries, no sparkle-root entry, \
+             and an exported root {}… that matches the old fragment hash \
+             (sha256(ledger.jsonl + log-head.json)) — it predates the root being committed \
+             to the chain",
+            entries.len(),
+            &legacy_root[..16.min(legacy_root.len())]
+        ),
+        "its per-probe entries committed self-reported runtime statistics and a fragment hash \
+         that binds neither file, so they cannot be rechecked; it is not evidence this build \
+         can verify — regenerate it into a fresh directory with `mnr sparkle --dir <new dir>`"
+            .to_string(),
+    ])
 }
 
 /// Compare the committed aggregate entries against the values recomputed from
@@ -720,6 +792,11 @@ pub struct VerifyReport {
     pub exported_root: Option<String>,
     /// Whether the aggregate ledger carries a head anchor.
     pub sealed: bool,
+    /// The aggregate is recognisably in the pre-0.2.0 layout, so the errors
+    /// explain the layout rather than listing a mismatch per probe. Never true
+    /// for a chain that merely lost its root entry: see
+    /// [`legacy_layout_explanation`].
+    pub legacy_layout: bool,
     pub errors: Vec<String>,
 }
 
@@ -732,6 +809,7 @@ impl VerifyReport {
             aggregation_root: String::new(),
             exported_root: None,
             sealed: false,
+            legacy_layout: false,
             errors: vec![message],
         }
     }
@@ -980,6 +1058,109 @@ mod tests {
         assert!(report.verified(), "errors: {:?}", report.errors);
         assert_eq!(report.aggregation_root, aggregation.aggregation_root);
         assert_eq!(report.exported_root.as_deref(), Some(zeros.as_str()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rewrite the aggregate in the pre-0.2.0 layout: one JSON fragment entry per
+    /// probe carrying runtime statistics, no root entry, and the root only in the
+    /// side file. Returns the root an old build would have published.
+    fn rewrite_as_legacy(dir: &Path) -> String {
+        let agg_dir = dir.join("aggregate");
+        std::fs::remove_dir_all(&agg_dir).unwrap();
+        std::fs::create_dir_all(&agg_dir).unwrap();
+
+        let probes = probe_dirs(dir).unwrap();
+        let mut hashes = Vec::new();
+        let mut ledger = Ledger::open(&agg_dir).unwrap();
+        for (probe_id, path) in &probes {
+            let fragment_hash = legacy_fragment_hash(path).unwrap();
+            let payload = serde_json::json!({
+                "probe_id": probe_id,
+                "fragment_hash": fragment_hash,
+                "final_drift": 0.42,
+                "steps": 5,
+                "trip_reason": "ttl",
+            });
+            ledger
+                .append("sparkle-fragment", &serde_json::to_vec(&payload).unwrap())
+                .unwrap();
+            hashes.push(fragment_hash);
+        }
+        ledger.seal().unwrap();
+
+        let root = compute_merkle_root(&hashes);
+        let meta = serde_json::json!({
+            "num_probes": probes.len(),
+            "aggregation_root": root,
+            "fragment_count": probes.len(),
+            "sealed_at": "2026-10-23T00:00:00Z",
+        });
+        std::fs::write(
+            agg_dir.join("aggregate-root.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn legacy_aggregate_is_explained_once_not_once_per_probe() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        let legacy_root = rewrite_as_legacy(&dir);
+
+        let report = verify(&dir);
+        assert!(!report.verified(), "a legacy aggregate does not verify");
+        assert!(report.legacy_layout);
+        assert!(
+            report.all_probes_ok,
+            "the probe ledgers are untouched: {:?}",
+            report.errors
+        );
+        assert_eq!(report.exported_root.as_deref(), Some(legacy_root.as_str()));
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(
+            report.errors[0].contains("pre-0.2.0 layout"),
+            "{:?}",
+            report.errors
+        );
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|e| e.contains("does not match the probe ledger")),
+            "per-probe mismatches would hide the reason: {:?}",
+            report.errors
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_shaped_aggregate_with_a_foreign_root_is_not_excused() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        rewrite_as_legacy(&dir);
+        let export = dir.join("aggregate").join("aggregate-root.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&export).unwrap()).unwrap();
+        meta["aggregation_root"] = serde_json::Value::String("0".repeat(64));
+        std::fs::write(&export, meta.to_string()).unwrap();
+
+        let report = verify(&dir);
+        assert!(
+            !report.legacy_layout,
+            "without a root matching the old hash, the shape alone proves nothing: {:?}",
+            report.errors
+        );
+        assert!(!report.verified());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("expected exactly one sparkle-root entry")),
+            "{:?}",
+            report.errors
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

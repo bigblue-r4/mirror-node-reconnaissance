@@ -177,6 +177,12 @@ unreleased `main` commits no longer verify.
   separator (domain-separated and length-prefixed).
 - Aggregate entries no longer carry self-reported run statistics (drift, steps,
   trip reason), which made them impossible to verify.
+- `mnr sparkle verify` recognises an aggregate written before that change and
+explains the pre-0.2.0 layout in two lines, instead of reporting a missing root
+entry plus a mismatch per probe. Recognition is positive — one fragment entry per
+probe, no root entry, and an exported root matching the old fragment hash — so a
+0.2.0 aggregate that lost or altered its root entry is still reported as damaged
+rather than old.
 - **Witness-log integrity.** `Ledger::seal()` now creates `log-head.json` with
   `create_new` and never rewrites it, and `Ledger::open()` checks an existing
   anchor against the chain before appending, then refuses a sealed directory.
