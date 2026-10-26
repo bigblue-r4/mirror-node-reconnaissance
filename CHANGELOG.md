@@ -14,10 +14,20 @@ came out of the work — a consolidation plan across the repositories that hold 
 witness log, and an extraction plan for the shared core — both unexecuted. The
 verifier now runs in CI rather than by hand.
 
-Breaking: aggregations produced by 0.1.0 no longer verify. The fragment hash
-layout and the committed aggregate payloads both changed.
+Upgrading is not a migration: logs written by 0.1.0 verify unchanged, and no
+released version produced an aggregation or a bundle, so nothing a release
+emitted is invalidated. What does change is that a sealed directory is final —
+0.1.0 reopened one, appended to it and overwrote the anchor, where 0.2.0 exits 1
+and writes nothing — which is a fix for a log that could be re-anchored silently.
+See [UPGRADING.md](UPGRADING.md) for that and for which aggregates from
+unreleased `main` commits no longer verify.
 
 ### Added
+- `UPGRADING.md` — the notes for moving a log, an aggregate or a bundle across a
+  release boundary, beginning with 0.1.0 → 0.2.0. Each claim in it was checked
+  against a `v0.1.0` build rather than asserted from the diff, including the one
+  behaviour change: a sealed directory that 0.1.0 would reopen and re-anchor is
+  now refused, with the files left byte-identical.
 - `tools/slate-v2-port/` — the `witness-bundle/2` producer ported behind
   `slate`'s own court-export command, as a ready-to-apply patch against
   `slate@c198ce0`. `slate export` now writes v2 by default (`--format v1` keeps
