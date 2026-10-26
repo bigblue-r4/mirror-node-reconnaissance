@@ -231,6 +231,26 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// cannot be confused with this one.
 pub const FRAGMENT_DOMAIN: &str = "mnr/sparkle-fragment/v1";
 pub const ROOT_DOMAIN: &str = "mnr/sparkle-root/v1";
+pub const FORMAT_DOMAIN: &str = "mnr/sparkle-format/v1";
+
+/// The aggregation layout this build writes and verifies.
+///
+/// `sparkle-aggregate/1` is the unversioned pre-0.2.0 layout — one JSON entry per
+/// probe carrying runtime statistics, no root entry, and the root only in
+/// `aggregate-root.json`. It never wrote this marker, so **its absence is the
+/// marker for format 1**. Format 2 leads the chain with a `sparkle-format`
+/// entry, commits the root as the last entry, and names itself in both places.
+///
+/// The version is in the payload, not only in a domain string, because the entry
+/// kind (`sparkle-format`) is what a reader sees in `ledger.jsonl`: payloads are
+/// stored as fingerprints, so the kind says "this chain is versioned" and the
+/// export copy says which version.
+pub const AGGREGATE_FORMAT: &str = "sparkle-aggregate/2";
+
+/// The exact bytes of the leading format entry.
+pub fn format_payload() -> Vec<u8> {
+    format!("{FORMAT_DOMAIN}\n{AGGREGATE_FORMAT}").into_bytes()
+}
 
 /// The exact bytes committed to the sealed chain for one probe. Verification
 /// rebuilds this from the probe directory alone, so nothing else may go in.
@@ -523,6 +543,12 @@ impl SparkleController {
 
         let mut agg_ledger = Ledger::open(&agg_dir).map_err(|e| e.to_string())?;
 
+        // First, so that a chain which never reaches its root entry still says
+        // which layout it was written in.
+        agg_ledger
+            .append("sparkle-format", &format_payload())
+            .map_err(|e| e.to_string())?;
+
         for frag in &aggregation.fragments {
             let payload = fragment_payload(frag.probe_id, &frag.fragment_hash);
             agg_ledger
@@ -543,6 +569,7 @@ impl SparkleController {
         // Exported copy for publishing the root. Verification never reads it:
         // the authoritative value is the one committed in the sealed chain.
         let root_meta = serde_json::json!({
+            "format": AGGREGATE_FORMAT,
             "note": "export copy only; verification recomputes the root from the probe ledgers and checks the sealed chain",
             "num_probes": aggregation.num_probes,
             "aggregation_root": aggregation.aggregation_root,
@@ -641,10 +668,15 @@ pub fn verify_sparkle_aggregation(dir: &str) -> VerifyReport {
         }
     }
 
-    let exported_root = fs::read_to_string(agg_dir.join("aggregate-root.json"))
+    let exported = fs::read_to_string(agg_dir.join("aggregate-root.json"))
         .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let exported_root = exported
+        .as_ref()
         .and_then(|meta| meta["aggregation_root"].as_str().map(str::to_string));
+    let exported_format = exported
+        .as_ref()
+        .and_then(|meta| meta["format"].as_str().map(str::to_string));
 
     VerifyReport {
         probes_verified,
@@ -652,6 +684,7 @@ pub fn verify_sparkle_aggregation(dir: &str) -> VerifyReport {
         aggregate_ok: aggregate_ok && sealed,
         aggregation_root: derived_root,
         exported_root,
+        exported_format,
         sealed,
         legacy_layout,
         errors,
@@ -726,14 +759,53 @@ fn check_committed_entries(
         .iter()
         .filter(|e| e.kind == "sparkle-root")
         .collect();
+    let formats: Vec<&LedgerEntry> = entries
+        .iter()
+        .filter(|e| e.kind == "sparkle-format")
+        .collect();
 
-    if entries.len() != probes.len() + 1 {
+    if entries.len() != probes.len() + 2 {
         ok = false;
         errors.push(format!(
-            "aggregate ledger holds {} entries; expected {} probes + 1 root",
+            "aggregate ledger holds {} entries; expected {} probes + 1 format + 1 root",
             entries.len(),
             probes.len()
         ));
+    }
+
+    // The format entry is how a reader tells this layout from its predecessor, so
+    // it has to be present, first, and name the layout this build can check.
+    match formats.first() {
+        None => {
+            ok = false;
+            errors.push(format!(
+                "aggregate ledger carries no sparkle-format entry; this build verifies {AGGREGATE_FORMAT}"
+            ));
+        }
+        Some(entry) => {
+            if formats.len() != 1 {
+                ok = false;
+                errors.push(format!(
+                    "expected exactly one sparkle-format entry, found {}",
+                    formats.len()
+                ));
+            }
+            if entry.payload_fingerprint != sha256_hex(&format_payload()) {
+                ok = false;
+                errors.push(format!(
+                    "aggregate names a format this build cannot verify (expected {AGGREGATE_FORMAT}): \
+                     written by a different version of this tool? (seq {})",
+                    entry.seq
+                ));
+            }
+            if entries.first().map(|e| e.seq) != Some(entry.seq) {
+                ok = false;
+                errors.push(
+                    "the sparkle-format entry is not the first entry of the aggregate chain"
+                        .to_string(),
+                );
+            }
+        }
     }
     if roots.len() != 1 {
         ok = false;
@@ -790,6 +862,10 @@ pub struct VerifyReport {
     pub aggregation_root: String,
     /// Root echoed from the exported copy, when present. Never trusted.
     pub exported_root: Option<String>,
+    /// Layout named by the exported copy, when present. Descriptive only: the
+    /// version this build verifies comes from the committed format entry, and a
+    /// disagreement is reported as a warning rather than believed.
+    pub exported_format: Option<String>,
     /// Whether the aggregate ledger carries a head anchor.
     pub sealed: bool,
     /// The aggregate is recognisably in the pre-0.2.0 layout, so the errors
@@ -808,6 +884,7 @@ impl VerifyReport {
             aggregate_ok: false,
             aggregation_root: String::new(),
             exported_root: None,
+            exported_format: None,
             sealed: false,
             legacy_layout: false,
             errors: vec![message],
@@ -1101,6 +1178,122 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    /// Rebuild the aggregate chain around another format payload, as a later
+    /// version of this tool would write it.
+    fn rewrite_with_format(dir: &Path, named: &str) {
+        let agg_dir = dir.join("aggregate");
+        std::fs::remove_dir_all(&agg_dir).unwrap();
+        std::fs::create_dir_all(&agg_dir).unwrap();
+
+        let probes = probe_dirs(dir).unwrap();
+        let mut hashes = Vec::new();
+        let mut ledger = Ledger::open(&agg_dir).unwrap();
+        let payload = format!("{FORMAT_DOMAIN}\n{named}");
+        ledger.append("sparkle-format", payload.as_bytes()).unwrap();
+        for (probe_id, path) in &probes {
+            let fragment_hash = hash_ledger_fragment(path).unwrap();
+            ledger
+                .append(
+                    "sparkle-fragment",
+                    &fragment_payload(*probe_id, &fragment_hash),
+                )
+                .unwrap();
+            hashes.push(fragment_hash);
+        }
+        let root = compute_merkle_root(&hashes);
+        ledger
+            .append("sparkle-root", &root_payload(probes.len() as u32, &root))
+            .unwrap();
+        ledger.seal().unwrap();
+
+        let meta = serde_json::json!({
+            "format": named,
+            "num_probes": probes.len(),
+            "aggregation_root": root,
+            "fragment_count": probes.len(),
+            "sealed_at": "2026-10-26T00:00:00Z",
+        });
+        std::fs::write(
+            agg_dir.join("aggregate-root.json"),
+            serde_json::to_string_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn aggregate_names_its_format_without_being_verified() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+
+        // Readable without hashing anything: the export copy names the layout in
+        // text, and the chain leads with an entry whose *kind* says it is versioned.
+        let export =
+            std::fs::read_to_string(dir.join("aggregate").join("aggregate-root.json")).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&export).unwrap();
+        assert_eq!(meta["format"], AGGREGATE_FORMAT);
+
+        let chain = std::fs::read_to_string(dir.join("aggregate").join("ledger.jsonl")).unwrap();
+        let first: serde_json::Value = serde_json::from_str(chain.lines().next().unwrap()).unwrap();
+        assert_eq!(first["kind"], "sparkle-format");
+        assert_eq!(
+            chain.matches("sparkle-format").count(),
+            1,
+            "exactly one format entry"
+        );
+
+        let report = verify(&dir);
+        assert!(report.verified(), "errors: {:?}", report.errors);
+        assert_eq!(report.exported_format.as_deref(), Some(AGGREGATE_FORMAT));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn aggregate_from_another_format_is_refused_and_named() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        rewrite_with_format(&dir, "sparkle-aggregate/3");
+
+        let report = verify(&dir);
+        assert!(!report.verified(), "an unknown format does not verify");
+        assert!(!report.legacy_layout, "a later format is not the old one");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("different version of this tool")),
+            "the refusal names the cause: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            report.exported_format.as_deref(),
+            Some("sparkle-aggregate/3")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_copy_cannot_rename_the_format() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        let export = dir.join("aggregate").join("aggregate-root.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&export).unwrap()).unwrap();
+        meta["format"] = serde_json::Value::String("sparkle-aggregate/1".to_string());
+        std::fs::write(&export, meta.to_string()).unwrap();
+
+        let report = verify(&dir);
+        assert!(
+            report.verified(),
+            "the chain, not the copy, decides: {:?}",
+            report.errors
+        );
+        assert_eq!(
+            report.exported_format.as_deref(),
+            Some("sparkle-aggregate/1")
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

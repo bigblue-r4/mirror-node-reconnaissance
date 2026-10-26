@@ -366,8 +366,12 @@ fn print_sparkle_report(report: &sparkle::VerifyReport) {
     let short = &root[..16.min(root.len())];
     if report.verified() {
         println!(
-            "OK: probes_verified={} all_probes_ok={} aggregate_ok={} sealed={} root={short}…",
-            report.probes_verified, report.all_probes_ok, report.aggregate_ok, report.sealed
+            "OK: probes_verified={} all_probes_ok={} aggregate_ok={} sealed={} format={} root={short}…",
+            report.probes_verified,
+            report.all_probes_ok,
+            report.aggregate_ok,
+            report.sealed,
+            sparkle::AGGREGATE_FORMAT
         );
     } else {
         eprintln!(
@@ -385,6 +389,15 @@ fn print_sparkle_report(report: &sparkle::VerifyReport) {
         if !report.legacy_layout && exported != root {
             eprintln!(
                 "  warning: aggregate-root.json claims {exported}…, which is not the root recomputed from the chain"
+            );
+        }
+    }
+    // Same rule for the format: the copy names a layout, the chain proves one.
+    if let Some(named) = &report.exported_format {
+        if named != sparkle::AGGREGATE_FORMAT {
+            eprintln!(
+                "  warning: aggregate-root.json names {named}, but only {} is verified by this build",
+                sparkle::AGGREGATE_FORMAT
             );
         }
     }

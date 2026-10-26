@@ -107,6 +107,12 @@ unreleased `main` commits no longer verify.
 - Aggregate entries now commit the fragment hash and the Merkle root as
   domain-separated, versioned payloads (`sparkle-fragment`, `sparkle-root`), so a
   verifier can rebuild them from the probe directories.
+- An aggregate names its own format (`sparkle-aggregate/2`) in two places a reader
+  can see without recomputing anything: a leading `sparkle-format` entry in the
+  aggregate chain, so a damaged chain still says which layout it was written in,
+  and a `format` field in `aggregate-root.json`. A chain whose format entry names
+  a different layout is refused by name instead of being mis-verified, and an
+  aggregate with no marker at all is reported as the pre-0.2.0 layout.
 - `scripts/ci/sparkle-tamper.sh`, run by a new `aggregation` CI job: it runs a
   sparkle aggregation, asserts the untouched run verifies, alters one byte of a
   probe ledger, and asserts verification then exits 1 and names that probe.

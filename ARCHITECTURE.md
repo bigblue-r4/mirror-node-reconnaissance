@@ -255,13 +255,16 @@ explicitly between steps.
 
 `mnr sparkle` runs N independent probes. Each probe is a full observer + ledger +
 reaper run in its own directory, and each seals its own log. The controller then
-commits two kinds of value to a separate aggregate ledger:
+commits three kinds of value to a separate aggregate ledger:
 
-1. one `sparkle-fragment` entry per probe, whose payload is exactly
+1. a leading `sparkle-format` entry naming the layout the rest of the chain is in:
+   `mnr/sparkle-format/v1\nsparkle-aggregate/2`. It is first so that a chain
+   damaged before its root still says which format it was written in;
+2. one `sparkle-fragment` entry per probe, whose payload is exactly
    `mnr/sparkle-fragment/v1\n<probe_id>\n<fragment_hash>`, where the fragment hash
    covers that probe's `ledger.jsonl` and `log-head.json` (domain-separated and
    length-prefixed);
-2. one final `sparkle-root` entry committing
+3. one final `sparkle-root` entry committing
    `mnr/sparkle-root/v1\n<probe_count>\n<merkle_root>`, where the root is a Merkle
    tree over the fragment hashes taken in probe-id order.
 
@@ -279,7 +282,15 @@ Consequences:
 - Deleting a probe, adding an entry, or rewriting the root is caught by count,
   ordering and hash comparison.
 - `aggregate-root.json` is an export copy for publishing the root. Verification
-  never reads it; a mismatch is reported as a warning, never trusted.
+  never reads the root from it; a mismatch is reported as a warning, never
+  trusted. The same applies to its `format` field: the chain's `sparkle-format`
+  entry decides which layout is verified.
+- The layout is identifiable without verifying: the chain's first entry is the
+  `sparkle-format` kind — a payload is stored as a fingerprint, so the kind says
+  the chain is versioned — and the export copy spells out `sparkle-aggregate/2`.
+  Neither existed before 0.2.0, so an aggregate with no marker is the old layout.
+  A chain whose format entry names another layout is refused by name; see
+  [UPGRADING.md](UPGRADING.md#aggregations-nothing-released-to-migrate).
 - The root commits to fragment hashes, not to probe plaintext, and verification
   needs the probe directories: this is a local audit, not a compact proof that a
   third party can check from the root alone.

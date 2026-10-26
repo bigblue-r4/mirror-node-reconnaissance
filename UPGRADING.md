@@ -64,6 +64,10 @@ fragment hash and the aggregate ledger changed during 0.2.0's development:
 - The aggregation root used to sit in a side file, `aggregate-root.json`,
   outside the chain. It is committed now, as the aggregate ledger's last entry,
   so verification trusts the chain and treats that file as an exported copy.
+- The chain is marked with its layout: a leading `sparkle-format` entry commits
+  `mnr/sparkle-format/v1\nsparkle-aggregate/2`, and the exported copy repeats
+  `sparkle-aggregate/2` in a `format` field. Neither existed before, so an
+  aggregate carrying neither is the old layout.
 
 An aggregate archived from one of those commits fails `mnr sparkle verify`, and
 the failure says which layout it is in rather than listing a mismatch per probe
@@ -85,9 +89,27 @@ or the missing root, and is not excused as old. A probe ledger also still has to
 verify on its own before any of this is said.
 
 Regenerate a legacy aggregate rather than keep it: `mnr sparkle` into a fresh
-`--dir`, then `mnr sparkle verify`. Old and new artifacts do not say which
-layout they use — the domain strings say `/v1` on both sides of the change and
-the `kind` tag stayed `sparkle-fragment` — so verification is what dates one.
+`--dir`, then `mnr sparkle verify`.
+
+A 0.2.0 aggregate also says which layout it is in, so telling the two apart no
+longer needs a verification:
+
+- the aggregate chain's first entry has `"kind":"sparkle-format"`, visible in
+  `aggregate/ledger.jsonl`. Payloads are stored only as fingerprints, so the kind
+  says the chain is versioned and the export copy below says which version;
+- `aggregate-root.json` carries `"format": "sparkle-aggregate/2"`.
+
+An aggregate written before the marker has neither, and that absence is the
+format-1 marker. A chain whose format entry names something this build does not
+verify is refused by name rather than half-checked:
+
+```
+  - aggregate names a format this build cannot verify (expected sparkle-aggregate/2): written by a different version of this tool? (seq 0)
+```
+
+The `format` field in the export copy is descriptive only, the same rule as its
+root: editing it does not change what is verified, and a value this build does
+not recognise is reported as a warning.
 
 ### Bundles: nothing to re-sign
 
@@ -105,5 +127,6 @@ by `tools/bundle-verify/`; `slate export --format 1` still writes them.
 | 0.2.0 refuses and writes nothing | Ran the 0.2.0 `mnr demo` against a copy of that sealed directory: exit 1, `ledger.jsonl` and `log-head.json` byte-identical afterwards |
 | 0.1.0 had no aggregation or bundle | Built `v0.1.0` prints its own usage: `demo`, `ledger verify`, `ledger show` only |
 | Old aggregates fail, and how | Built `92cb930` (sparkle, before the chain and preimage change), produced an aggregate with it, verified it with the 0.2.0 binary: exit 1, two lines naming the pre-0.2.0 layout and pointing at a fresh run |
+| The layout is identifiable by inspection | Ran `mnr sparkle` for 2 probes: `aggregate/ledger.jsonl` starts with `kind: sparkle-format` and `aggregate-root.json` has `"format": "sparkle-aggregate/2"`; verification reports `format=sparkle-aggregate/2` |
 | The layout is recognised, not guessed | Two CLI tests: a rewritten pre-0.2.0 aggregate is explained once with no per-probe mismatch lines; the same shape with a foreign exported root is not explained, and still reports the missing root |
 | The aggregate changes are as described | Compared `cli/src/sparkle.rs` at `92cb930` with the current file: fragment hash and committed payload, as listed above |
