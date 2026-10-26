@@ -65,14 +65,28 @@ fragment hash and the aggregate ledger changed during 0.2.0's development:
   outside the chain. It is committed now, as the aggregate ledger's last entry,
   so verification trusts the chain and treats that file as an exported copy.
 
-An aggregate archived from one of those commits fails `mnr sparkle verify` at
-the fragment hashes. Regenerate it rather than keep it — `mnr sparkle` into a
-fresh `--dir`, then `mnr sparkle verify`.
+An aggregate archived from one of those commits fails `mnr sparkle verify`, and
+the failure names the format rather than an attack:
 
-One caveat worth knowing when you compare old and new artifacts: the domain
-strings above both say `/v1`, and the aggregate ledger's `kind` tag stayed
-`sparkle-fragment` across the change. The two layouts are therefore not
-distinguishable by inspection, only by failing.
+```
+$ mnr sparkle verify --dir ./sparkle-old
+SPARKLE VERIFY FAILED: probes_verified=2 all_probes_ok=true aggregate_ok=false sealed=true
+  - aggregate ledger holds 2 entries; expected 2 probes + 1 root
+  - expected exactly one sparkle-root entry, found 0
+  - probe 0: committed fragment does not match the probe ledger (seq 0)
+  - probe 1: committed fragment does not match the probe ledger (seq 1)
+  warning: aggregate-root.json claims 6314d7bd…, which is not the root recomputed from the chain
+```
+
+A missing `sparkle-root` entry and every fragment mismatched, while the probe
+ledgers verified and the aggregate chain is intact, is the signature of the old
+layout — not of a truncated or rewritten aggregate. Regenerate it rather than
+keep it: `mnr sparkle` into a fresh `--dir`, then `mnr sparkle verify`.
+
+One caveat worth knowing when you compare old and new artifacts: nothing in
+them says which layout they use. The domain strings say `/v1` on both sides of
+the change, and the aggregate ledger's `kind` tag stayed `sparkle-fragment`, so
+inspection cannot date an aggregate — only verifying it can.
 
 ### Bundles: nothing to re-sign
 
@@ -89,4 +103,5 @@ by `tools/bundle-verify/`; `slate export --format 1` still writes them.
 | 0.1.0 re-anchored a sealed directory | Ran 0.1.0's `mnr demo` against its own sealed `--dir`: 81 → 162 entries, `log-head.json` rewritten, exit 0 |
 | 0.2.0 refuses and writes nothing | Ran the 0.2.0 `mnr demo` against a copy of that sealed directory: exit 1, `ledger.jsonl` and `log-head.json` byte-identical afterwards |
 | 0.1.0 had no aggregation or bundle | Built `v0.1.0` prints its own usage: `demo`, `ledger verify`, `ledger show` only |
-| The aggregate changes are as described | Read the diffs of `cli/src/sparkle.rs` at `256d647` (first sparkle) and `9c61a46` (chain and preimage) |
+| Old aggregates fail, and how | Built `92cb930` (sparkle, before the chain and preimage change), produced an aggregate with it, verified it with the 0.2.0 binary: exit 1, four errors — no `sparkle-root` entry, both committed fragments mismatched, and `aggregate-root.json` disagreeing with the recomputed root |
+| The aggregate changes are as described | Compared `cli/src/sparkle.rs` at `92cb930` with the current file: fragment hash and committed payload, as listed above |

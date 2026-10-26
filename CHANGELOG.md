@@ -25,9 +25,9 @@ unreleased `main` commits no longer verify.
 ### Added
 - `UPGRADING.md` — the notes for moving a log, an aggregate or a bundle across a
   release boundary, beginning with 0.1.0 → 0.2.0. Each claim in it was checked
-  against a `v0.1.0` build rather than asserted from the diff, including the one
-  behaviour change: a sealed directory that 0.1.0 would reopen and re-anchor is
-  now refused, with the files left byte-identical.
+  against a build of the tag or of the commit concerned rather than asserted from
+  the diff, including the one behaviour change: a sealed directory that 0.1.0
+  would reopen and re-anchor is now refused, with the files left byte-identical.
 - `tools/slate-v2-port/` — the `witness-bundle/2` producer ported behind
   `slate`'s own court-export command, as a ready-to-apply patch against
   `slate@c198ce0`. `slate export` now writes v2 by default (`--format v1` keeps
