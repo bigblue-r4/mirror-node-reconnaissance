@@ -299,7 +299,7 @@ with no implementation for the same reason.
 | Lifecycle controller (reaper) | `lifecycle/reaper/` | **Code** — TTL/trip checks, seal-then-wipe |
 | Bundled synthetic swarm | `sim/mock-swarm/` | **Code** — the only connector; a lab fixture |
 | Bundle producer and signer | `core/bundle/` | **Code** — `witness-bundle/2` header, preimage, Merkle proofs, Ed25519 signing |
-| CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle`, `ledger verify`, `ledger show`, `bundle keygen`, `bundle export` |
+| CLI and configuration | `cli/`, `configs/` | **Code** — `demo`, `sparkle` with `verify` and `show`, `ledger verify`/`show`, `bundle keygen`/`export` |
 | Court-export format | `BUNDLE_SCHEMA.md` | **Specification** — implemented by `mnr bundle export`; v1 bundles still verify |
 | Independent bundle verifier | `tools/bundle-verify/` | **Code** — Python, no dependencies, 50 tests |
 | slate v2 export port | `tools/slate-v2-port/` | **Patch** — applies to `slate@c198ce0`; not upstream |
