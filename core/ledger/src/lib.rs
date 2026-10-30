@@ -15,6 +15,19 @@
 //! re-running the node in the same directory therefore fails loudly instead of
 //! silently re-anchoring the shortened chain.
 //!
+//! # One writer per directory
+//!
+//! [`Ledger::open`] takes an exclusive advisory lock on `<dir>/.lock` and holds
+//! it until the [`Ledger`] is dropped. Two processes appending to one directory
+//! each derive `seq` and `prev_hash` from their own in-memory view of the chain,
+//! so their entries claim the same position and the log forks — corruption that
+//! verification reports later as a chain break, with no adversary involved. The
+//! lock turns that into a refusal at open time.
+//!
+//! It is **advisory**: it stops another `mnr` writer, not a program that ignores
+//! the file. Readers ([`Ledger::verify`], [`Ledger::read_entries`]) take no lock,
+//! so copy the directory if you need a stable snapshot mid-run.
+//!
 //! # Trust boundary
 //!
 //! There is no key, MAC or signature here — only SHA-256. The guarantee is
@@ -40,7 +53,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -50,6 +63,10 @@ pub const GENESIS_PREV: &str = "000000000000000000000000000000000000000000000000
 
 const LOG_FILE: &str = "ledger.jsonl";
 const HEAD_FILE: &str = "log-head.json";
+/// The file the directory's write lock is taken on. Its existence is not the
+/// lock: the lock is the `flock`/`LockFileEx` on the open handle, so a writer
+/// that crashes or is killed leaves the file and no live lock behind.
+const LOCK_FILE: &str = ".lock";
 
 /// One link in the witness chain. No plaintext is ever stored — only the
 /// SHA-256 fingerprint of the payload.
@@ -118,6 +135,11 @@ pub enum LedgerError {
     InvalidKind {
         kind: String,
     },
+    /// Another process holds the directory's write lock: a ledger has exactly
+    /// one writer at a time.
+    Locked {
+        dir: PathBuf,
+    },
 }
 
 impl fmt::Display for LedgerError {
@@ -150,6 +172,13 @@ impl fmt::Display for LedgerError {
                 f,
                 "invalid ledger kind {kind:?}: expected 1..=64 bytes of [A-Za-z0-9._-]"
             ),
+            LedgerError::Locked { dir } => write!(
+                f,
+                "ledger directory {} is locked by another mnr process: a ledger has \
+                 one writer at a time, and two writers fork the chain; retry when \
+                 the other mnr exits, or use a separate directory",
+                dir.display()
+            ),
         }
     }
 }
@@ -177,6 +206,44 @@ pub struct Ledger {
     last_hash: String,
     next_seq: u64,
     count: u64,
+    /// Held from [`Ledger::open`] until drop. Releasing it is what admits the
+    /// next writer; nothing reads it.
+    _lock: DirLock,
+}
+
+/// The directory's exclusive advisory lock, held for the writer's lifetime.
+///
+/// Backed by [`File::try_lock`] on `<dir>/.lock` — `flock(LOCK_EX)` on unix,
+/// `LockFileEx` on Windows. The kernel releases it when the handle closes,
+/// including on a crash or `SIGKILL`, so a dead writer cannot leave the store
+/// permanently unusable.
+struct DirLock {
+    _file: File,
+}
+
+impl DirLock {
+    /// Take the lock without waiting.
+    ///
+    /// Deliberately non-blocking: a writer queued behind a slow one looks
+    /// exactly like a hung process, and the operator cannot tell which is which.
+    /// [`LedgerError::Locked`] names the holder's directory instead.
+    fn acquire(dir: &Path) -> Result<Self, LedgerError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            // The lock file is empty and shared by every writer that ever used
+            // the directory; never truncate it out from under a live holder.
+            .truncate(false)
+            .open(dir.join(LOCK_FILE))?;
+        match file.try_lock() {
+            Ok(()) => Ok(DirLock { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(LedgerError::Locked {
+                dir: dir.to_path_buf(),
+            }),
+            Err(TryLockError::Error(e)) => Err(LedgerError::Io(e)),
+        }
+    }
 }
 
 impl Ledger {
@@ -186,9 +253,19 @@ impl Ledger {
     /// chain, and then opening fails with [`LedgerError::AlreadySealed`]: a
     /// sealed witness log is final, which is what stops a truncated log from
     /// being re-anchored.
+    ///
+    /// The directory's exclusive write lock is taken first and held until this
+    /// value drops, so a second writer fails with [`LedgerError::Locked`] instead
+    /// of appending an entry that claims a position already taken. The kernel
+    /// releases the lock when the process exits, so a crash cannot wedge the
+    /// directory.
     pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self, LedgerError> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
+        // Before the chain is read: otherwise a second process could append
+        // between this read and our first `append`, and both writers would
+        // derive `seq`/`prev_hash` from the same tip.
+        let lock = DirLock::acquire(&dir)?;
         let entries = read_all(&dir.join(LOG_FILE))?;
         check_chain(&entries)?;
         let head_path = dir.join(HEAD_FILE);
@@ -206,6 +283,7 @@ impl Ledger {
             last_hash,
             next_seq,
             count: entries.len() as u64,
+            _lock: lock,
         })
     }
 
@@ -674,6 +752,9 @@ mod tests {
         l.seal().unwrap();
 
         keep_lines(&dir, 4);
+        // A real re-run is a new process; this handle still holds the directory
+        // lock, so release it before asking what a second writer sees.
+        drop(l);
 
         // Re-running the node in this directory must fail against the anchor
         // rather than appending and re-sealing the shortened chain.
@@ -713,6 +794,7 @@ mod tests {
         let mut l = Ledger::open(&dir).unwrap();
         l.append("observation", b"a").unwrap();
         l.seal().unwrap();
+        drop(l);
         let err = Ledger::open(&dir).map(|_| ()).unwrap_err();
         assert!(
             matches!(err, LedgerError::AlreadySealed { .. }),
@@ -770,6 +852,60 @@ mod tests {
         assert_eq!(l.len(), 0);
         l.append("model-turn", b"x").unwrap();
         assert_eq!(l.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mnr-ledger-lock-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_second_writer_is_refused_then_admitted_after_the_first_drops() {
+        let dir = scratch("exclusive");
+        let first = Ledger::open(&dir).unwrap();
+        let err = match Ledger::open(&dir) {
+            Err(e) => e,
+            Ok(_) => panic!("a second writer must not open a held ledger directory"),
+        };
+        assert!(matches!(err, LedgerError::Locked { .. }), "got {err}");
+        assert!(err.to_string().contains("one writer at a time"), "{err}");
+        drop(first);
+        let again = Ledger::open(&dir).expect("the lock must be released when the writer drops");
+        assert_eq!(again.len(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_sealed_directory_still_reports_its_seal() {
+        let dir = scratch("sealed");
+        {
+            let mut l = Ledger::open(&dir).unwrap();
+            l.append("observation", b"x").unwrap();
+            l.seal().unwrap();
+        }
+        let err = match Ledger::open(&dir) {
+            Err(e) => e,
+            Ok(_) => panic!("a sealed log must not reopen"),
+        };
+        assert!(
+            matches!(err, LedgerError::AlreadySealed { .. }),
+            "got {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -21,6 +21,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   build the previous test run used. A CI step reads the file and fails if the
   installed `rustc` is not the version it names.
 
+### Fixed
+- A ledger directory now has exactly one writer. `Ledger::open` takes an
+  exclusive advisory lock on `<dir>/.lock` and holds it until the handle drops,
+  so two concurrent processes can no longer append entries that claim the same
+  `seq` and `prev_hash` — corruption that verification reported afterwards as a
+  chain break, with no adversary involved. A second writer fails immediately
+  rather than blocking, the kernel releases the lock when the writer exits, and
+  readers take no lock, so verification during a run still works on a copy.
+
 ## [0.2.0] — 2026-10-26
 
 The court-export format gets its second version, a verifier written independently

@@ -67,6 +67,11 @@ Stated explicitly, because each of these is easy to assume from the names:
   `log-head.json`, rebuild a consistent chain, seal it, and pass verification. A
   deleted anchor is indistinguishable from a log that was never sealed, which is
   why verification reports `UNSEALED` rather than `OK`.
+- **The directory lock is advisory.** `Ledger::open` holds an exclusive lock on
+  `<dir>/.lock` for the writer's lifetime, which stops a second `mnr` process
+  from forking the chain. It does not stop any other program from appending,
+  readers take no lock, and it protects nothing once the directory is writable
+  by someone who simply deletes it.
 - **Fingerprints are not confidential.** With a small input domain — the mock's
   fixed word tables, for instance — a SHA-256 fingerprint can be inverted by
   guessing. The log limits bulk disclosure, not a determined reader.

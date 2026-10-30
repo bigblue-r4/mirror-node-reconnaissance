@@ -230,6 +230,12 @@ than "tamper-proof". This section is the short version of
   `ledger.jsonl` and `log-head.json`, rebuild a consistent chain, seal it and pass
   verification. Exporting the head to separate custody at seal time is what would
   bind it; the repository does not do that step.
+- **One writer per directory.** `Ledger::open` takes an exclusive advisory lock
+  on `<dir>/.lock`, so two processes cannot append entries claiming the same
+  position and fork the chain. A second writer fails immediately instead of
+  blocking, and verification takes no lock — copy the directory to inspect it
+  during a run. The lock is advisory: it stops another `mnr`, not a program that
+  ignores the file.
 - **No trusted time.** Timestamps are self-reported wall-clock values, and
   `iso_now()` falls back to the Unix epoch if the clock read fails. Nothing here
   is a trusted timestamp or by itself a legal artifact.
