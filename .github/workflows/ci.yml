@@ -13,10 +13,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `stable`: a new stable release must not change what this job
+      # reports without a commit that says so.
+      - name: Install the pinned toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt, clippy
+      - name: The installed compiler matches rust-toolchain.toml
+        run: |
+          want=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          got=$(rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml pins $want; rustc is $got"
+          test "$want" = "$got"
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
@@ -43,8 +52,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install the pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Build the mnr binary
         run: cargo build -p mnr-cli

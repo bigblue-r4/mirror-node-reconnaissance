@@ -82,11 +82,14 @@ self-reported. Neither is implemented here; see [Limits](#limits).
 ## Try it now (sealed lab)
 
 The lab is the load: a simulated observer reads synthetic swarm traffic, writes
-every step to the log, and tears itself down when its lease expires.
+every step to the log, and tears itself down when its lease expires. The Rust
+toolchain is pinned in [rust-toolchain.toml](rust-toolchain.toml) — 1.99.1 with
+`rustfmt` and `clippy` — so `rustup` installs that version on the first `cargo`
+command and CI compiles with the same compiler as your machine.
 
 ```bash
 cargo build
-cargo test --workspace     # 72 tests: bundle, ledger, observer, reaper, sim, CLI
+cargo test --workspace     # 80 tests: bundle, ledger, observer, reaper, sim, CLI
 
 cargo run -p mnr-cli --bin mnr -- demo --dir ./mnr-run
 cargo run -p mnr-cli --bin mnr -- ledger verify --dir ./mnr-run

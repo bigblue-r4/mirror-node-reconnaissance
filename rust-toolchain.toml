@@ -1,0 +1,13 @@
+# The Rust version this workspace is built and tested with.
+#
+# Pinned to a release rather than `stable` so that "it builds" and "the tests
+# pass" mean the same thing in two runs a month apart. rustup reads this file
+# from the repository root and installs the toolchain on the first cargo
+# invocation, so a fresh clone needs no extra setup step.
+#
+# `.github/workflows/ci.yml` installs this same version, and one of its steps
+# fails if the workflow and this file disagree.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

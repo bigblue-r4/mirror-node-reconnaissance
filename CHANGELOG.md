@@ -14,6 +14,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hold", and is the only one of the two that is a result rather than a
   description.
 
+### Changed
+- The Rust toolchain is pinned: `rust-toolchain.toml` names 1.99.1 with `rustfmt`
+  and `clippy`, and both CI jobs install that version instead of tracking
+  `stable`, which is how a rebuild resolves to a different compiler than the
+  build the previous test run used. A CI step reads the file and fails if the
+  installed `rustc` is not the version it names.
+
 ## [0.2.0] — 2026-10-26
 
 The court-export format gets its second version, a verifier written independently
