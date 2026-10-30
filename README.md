@@ -336,9 +336,13 @@ as evidence about a deployed system.
 
 ## Reporting
 
-Report vulnerabilities or misuse through the repository's private reporting
-(GitHub → **Security** → *Report a vulnerability*); there is no published email
-address for this project. Do not open a public issue containing exploit detail.
+Security problems go to [SECURITY.md](SECURITY.md): a private advisory through the
+repository's **Security** tab, never a public issue carrying details. That policy
+also draws the line this file spends most of its length on — a verifier printing
+`OK` for evidence that should fail is a defect, while custody, completeness and
+self-reported time are stated limits — so the same ground is not covered twice.
+
+Everything else belongs in the issue tracker.
 
 ---
 
