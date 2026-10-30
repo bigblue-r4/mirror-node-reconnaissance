@@ -104,6 +104,9 @@ anchor. Opening the directory takes an exclusive advisory lock on
 `<dir>/.lock`, held for the writer's lifetime: a store has one writer at a
 time, so two processes cannot append entries claiming the same position.
 Readers take no lock.
+A seal may also carry `log-head.sig`, an Ed25519 signature over the anchor made
+with the node key, which `verify_signed` checks against a pinned key; plain
+`verify` reports its presence and judges nothing.
 
 - **Entry:** `{ seq, ts, kind, prev_hash, payload_fingerprint, entry_hash }`.
 - **Fingerprint, not plaintext.** Callers hand raw bytes to `append`; only the

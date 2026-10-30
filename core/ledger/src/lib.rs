@@ -50,6 +50,8 @@
 //! lab's mock vocabulary, for instance) a fingerprint can be inverted by
 //! guessing.
 
+use ed25519_dalek::{Signature, Signer};
+pub use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -67,6 +69,10 @@ const HEAD_FILE: &str = "log-head.json";
 /// lock: the lock is the `flock`/`LockFileEx` on the open handle, so a writer
 /// that crashes or is killed leaves the file and no live lock behind.
 const LOCK_FILE: &str = ".lock";
+/// Detached signature over the sealed head, hex-encoded. Its presence is what
+/// [`VerifyReport::signed`] reports; whether it is *valid* can only be answered
+/// against a key the verifier already trusts.
+const SIG_FILE: &str = "log-head.sig";
 
 /// One link in the witness chain. No plaintext is ever stored — only the
 /// SHA-256 fingerprint of the payload.
@@ -140,6 +146,17 @@ pub enum LedgerError {
     Locked {
         dir: PathBuf,
     },
+    /// A key was pinned but the seal carries no signature at all.
+    HeadUnsigned,
+    /// The head signature did not verify under the pinned key: the anchor was
+    /// rewritten after sealing, or it was sealed by a different key.
+    HeadSignatureInvalid,
+    /// `log-head.sig` already exists and disagrees with the head being sealed.
+    HeadSignatureConflict,
+    /// The anchor or signature could not be framed for signing: a bad hash, a
+    /// newline inside the timestamp, or a signature file that is not 64 bytes
+    /// of hex.
+    MalformedHead,
 }
 
 impl fmt::Display for LedgerError {
@@ -179,6 +196,28 @@ impl fmt::Display for LedgerError {
                  the other mnr exits, or use a separate directory",
                 dir.display()
             ),
+            LedgerError::HeadUnsigned => write!(
+                f,
+                "the seal carries no signature: `log-head.sig` is missing, though a \
+                 head key was pinned (a sealed head is signed once and never \
+                 re-anchored, so this anchor predates signing or was stripped)"
+            ),
+            LedgerError::HeadSignatureInvalid => write!(
+                f,
+                "head signature does not verify under the pinned key: the anchor \
+                 was edited after sealing, or it was sealed by a different key"
+            ),
+            LedgerError::HeadSignatureConflict => write!(
+                f,
+                "log-head.sig already exists and signs a different head; a seal is \
+                 final, so refusing to replace it"
+            ),
+            LedgerError::MalformedHead => write!(
+                f,
+                "the head anchor or its signature is malformed: expected a 64-char \
+                 hex head_hash, a timestamp without line breaks, and a 64-byte \
+                 hex signature"
+            ),
         }
     }
 }
@@ -198,6 +237,10 @@ pub struct VerifyReport {
     pub head_hash: String,
     /// Whether a `log-head.json` anchor was present and matched.
     pub sealed: bool,
+    /// Whether a `log-head.sig` accompanies the anchor. Presence only:
+    /// [`Ledger::verify`] holds no key, so it cannot judge the signature —
+    /// [`Ledger::verify_signed`] is the variant that does.
+    pub signed: bool,
 }
 
 /// An append-only witness log rooted at a directory.
@@ -209,6 +252,10 @@ pub struct Ledger {
     /// Held from [`Ledger::open`] until drop. Releasing it is what admits the
     /// next writer; nothing reads it.
     _lock: DirLock,
+    /// Present when the ledger was opened with a node key; every seal then signs
+    /// the anchor. Absent, sealing behaves exactly as it did before signing
+    /// existed.
+    key: Option<SigningKey>,
 }
 
 /// The directory's exclusive advisory lock, held for the writer's lifetime.
@@ -260,7 +307,22 @@ impl Ledger {
     /// releases the lock when the process exits, so a crash cannot wedge the
     /// directory.
     pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self, LedgerError> {
-        let dir = dir.as_ref().to_path_buf();
+        Self::open_inner(dir.as_ref().to_path_buf(), None)
+    }
+
+    /// Open (or create) a ledger that signs its head with `key` when it seals.
+    ///
+    /// The rules are [`Ledger::open`]'s, unchanged: the directory lock, the
+    /// chain check before any append, and the refusal to reopen a sealed log.
+    /// The only difference is that [`Ledger::seal`] also writes
+    /// `<dir>/log-head.sig`, so a later reader holding the matching public key
+    /// can tell a seal made by this key from one made by whoever can write the
+    /// directory.
+    pub fn open_with_key<P: AsRef<Path>>(dir: P, key: SigningKey) -> Result<Self, LedgerError> {
+        Self::open_inner(dir.as_ref().to_path_buf(), Some(key))
+    }
+
+    fn open_inner(dir: PathBuf, key: Option<SigningKey>) -> Result<Self, LedgerError> {
         std::fs::create_dir_all(&dir)?;
         // Before the chain is read: otherwise a second process could append
         // between this read and our first `append`, and both writers would
@@ -284,6 +346,7 @@ impl Ledger {
             next_seq,
             count: entries.len() as u64,
             _lock: lock,
+            key,
         })
     }
 
@@ -388,10 +451,13 @@ impl Ledger {
                 let same = existing.head_seq == head.head_seq
                     && existing.head_hash == head.head_hash
                     && existing.count == head.count;
-                if same {
-                    return Ok(existing);
+                if !same {
+                    return Err(LedgerError::AlreadySealed { head: existing });
                 }
-                return Err(LedgerError::AlreadySealed { head: existing });
+                if let Some(key) = &self.key {
+                    self.write_signature(&existing, key)?;
+                }
+                return Ok(existing);
             }
             Err(e) => return Err(e.into()),
         };
@@ -400,7 +466,36 @@ impl Ledger {
         f.write_all(&json)?;
         f.flush()?;
         f.sync_all()?;
+        if let Some(key) = &self.key {
+            self.write_signature(&head, key)?;
+        }
         Ok(head)
+    }
+
+    /// Write `<dir>/log-head.sig`, create-once. Re-writing the same signature is
+    /// a no-op; a different one is a conflict, because a seal is final and its
+    /// signature is part of it.
+    fn write_signature(&self, head: &LedgerHead, key: &SigningKey) -> Result<(), LedgerError> {
+        let payload = head_signing_payload(head)?;
+        let want = hex(&key.sign(&payload).to_bytes());
+        let path = self.dir.join(SIG_FILE);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                f.write_all(want.as_bytes())?;
+                f.write_all(b"\n")?;
+                f.flush()?;
+                f.sync_all()?;
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if std::fs::read_to_string(&path)?.trim() == want {
+                    Ok(())
+                } else {
+                    Err(LedgerError::HeadSignatureConflict)
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Read every entry of an on-disk ledger without opening it for writing.
@@ -421,22 +516,53 @@ impl Ledger {
     /// internally consistent, but truncation cannot be ruled out. A deleted
     /// anchor and a never-sealed log are indistinguishable.
     pub fn verify<P: AsRef<Path>>(dir: P) -> Result<VerifyReport, LedgerError> {
-        let dir = dir.as_ref();
+        Self::verify_inner(dir.as_ref(), None)
+    }
+
+    /// Verify the chain and anchor, and require the anchor's signature to verify
+    /// under `key`.
+    ///
+    /// This is the check that distinguishes a seal made by the node from a
+    /// consistent chain rebuilt by anyone who can write the directory: without
+    /// it, `log-head.json` is just a file. It answers *who sealed this*, not *was
+    /// this the whole log* — the head covers the entries it was sealed over, so a
+    /// log truncated before sealing and then signed still verifies.
+    pub fn verify_signed<P: AsRef<Path>>(
+        dir: P,
+        key: &VerifyingKey,
+    ) -> Result<VerifyReport, LedgerError> {
+        Self::verify_inner(dir.as_ref(), Some(key))
+    }
+
+    fn verify_inner(dir: &Path, key: Option<&VerifyingKey>) -> Result<VerifyReport, LedgerError> {
         let entries = read_all(&dir.join(LOG_FILE))?;
         check_chain(&entries)?;
 
         let (_, actual_hash) = chain_tail(&entries);
         let head_path = dir.join(HEAD_FILE);
         let sealed = head_path.exists();
+        let mut signed = false;
         if sealed {
             let anchor = read_head(&head_path)?;
             check_anchor(&anchor, &entries)?;
+            let sig_path = dir.join(SIG_FILE);
+            signed = sig_path.exists();
+            if let Some(key) = key {
+                if !signed {
+                    return Err(LedgerError::HeadUnsigned);
+                }
+                check_head_signature(&anchor, &std::fs::read_to_string(&sig_path)?, key)?;
+            }
+        } else if key.is_some() {
+            // An empty, never-sealed directory is not a signed seal either.
+            return Err(LedgerError::HeadUnsigned);
         }
 
         Ok(VerifyReport {
             entries: entries.len() as u64,
             head_hash: actual_hash,
             sealed,
+            signed,
         })
     }
 }
@@ -500,6 +626,54 @@ fn check_anchor(anchor: &LedgerHead, entries: &[LedgerEntry]) -> Result<(), Ledg
             actual_hash,
         })
     }
+}
+
+/// The exact bytes a head signature covers.
+///
+/// Domain- and field-separated in the same style as an entry hash, so the
+/// signature cannot be replayed as a signature over anything else. `sealed_at` is
+/// included: the anchor is signed as a whole, so its timestamp cannot be edited
+/// after the fact either. The framing is refused rather than guessed at when a
+/// field could contain the separator.
+fn head_signing_payload(head: &LedgerHead) -> Result<Vec<u8>, LedgerError> {
+    let hash_ok =
+        head.head_hash.len() == 64 && head.head_hash.bytes().all(|b| b.is_ascii_hexdigit());
+    let ts_ok = !head.sealed_at.contains(['\n', '\r']);
+    if !hash_ok || !ts_ok {
+        return Err(LedgerError::MalformedHead);
+    }
+    Ok(format!(
+        "mnr/log-head/v1\n{}\n{}\n{}\n{}",
+        head.head_seq, head.head_hash, head.count, head.sealed_at
+    )
+    .into_bytes())
+}
+
+/// Check `raw_hex` (the contents of `log-head.sig`) as `key`'s signature over the
+/// anchor's payload.
+fn check_head_signature(
+    head: &LedgerHead,
+    raw_hex: &str,
+    key: &VerifyingKey,
+) -> Result<(), LedgerError> {
+    let bytes = decode_hex(raw_hex.trim()).ok_or(LedgerError::MalformedHead)?;
+    let sig_bytes: [u8; 64] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| LedgerError::MalformedHead)?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    key.verify_strict(&head_signing_payload(head)?, &signature)
+        .map_err(|_| LedgerError::HeadSignatureInvalid)
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -906,6 +1080,136 @@ mod lock_tests {
             matches!(err, LedgerError::AlreadySealed { .. }),
             "got {err}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod head_signature_tests {
+    use super::*;
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mnr-head-sig-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn sealed(tag: &str, seed: u8) -> PathBuf {
+        let dir = scratch(tag);
+        let mut l = Ledger::open_with_key(&dir, key(seed)).unwrap();
+        l.append("observation", b"a").unwrap();
+        l.seal().unwrap();
+        drop(l);
+        dir
+    }
+
+    #[test]
+    fn a_signed_seal_verifies_under_the_pinned_key() {
+        let dir = sealed("valid", 7);
+        let report = Ledger::verify_signed(&dir, &key(7).verifying_key()).unwrap();
+        assert!(report.sealed);
+        assert!(report.signed);
+        assert_eq!(report.entries, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn plain_verify_reports_the_signature_without_judging_it() {
+        let dir = sealed("presence", 7);
+        let report = Ledger::verify(&dir).unwrap();
+        assert!(report.sealed && report.signed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unsigned_seal_is_refused_when_a_key_is_pinned() {
+        let dir = scratch("unsigned");
+        let mut l = Ledger::open(&dir).unwrap();
+        l.append("observation", b"a").unwrap();
+        l.seal().unwrap();
+        drop(l);
+
+        // It is still a valid seal, just not an attributable one.
+        assert!(Ledger::verify(&dir).unwrap().sealed);
+        assert!(!Ledger::verify(&dir).unwrap().signed);
+        let err = match Ledger::verify_signed(&dir, &key(7).verifying_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("an unsigned seal must not satisfy a pinned key"),
+        };
+        assert!(matches!(err, LedgerError::HeadUnsigned), "got {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn another_key_does_not_verify_the_seal() {
+        let dir = sealed("wrongkey", 7);
+        let err = match Ledger::verify_signed(&dir, &key(9).verifying_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("a different key must not verify the seal"),
+        };
+        assert!(
+            matches!(err, LedgerError::HeadSignatureInvalid),
+            "got {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn editing_the_timestamp_after_sealing_breaks_the_signature() {
+        let dir = sealed("timestamp", 7);
+        // The anchor still describes the chain, so only the signature can object.
+        let path = dir.join(HEAD_FILE);
+        let mut anchor: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        anchor["sealed_at"] = serde_json::Value::String("2020-01-01T00:00:00Z".into());
+        std::fs::write(&path, serde_json::to_string_pretty(&anchor).unwrap()).unwrap();
+
+        assert!(Ledger::verify(&dir).is_ok());
+        let err = match Ledger::verify_signed(&dir, &key(7).verifying_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("an edited anchor must not verify"),
+        };
+        assert!(
+            matches!(err, LedgerError::HeadSignatureInvalid),
+            "got {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stripping_the_signature_is_reported_as_unsigned() {
+        let dir = sealed("stripped", 7);
+        std::fs::remove_file(dir.join(SIG_FILE)).unwrap();
+        let err = match Ledger::verify_signed(&dir, &key(7).verifying_key()) {
+            Err(e) => e,
+            Ok(_) => panic!("a stripped signature must not verify"),
+        };
+        assert!(matches!(err, LedgerError::HeadUnsigned), "got {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resealing_the_same_head_is_idempotent_and_never_rewrites_the_signature() {
+        let dir = scratch("idempotent");
+        let mut l = Ledger::open_with_key(&dir, key(7)).unwrap();
+        l.append("observation", b"a").unwrap();
+        let first = l.seal().unwrap();
+        let sig = std::fs::read_to_string(dir.join(SIG_FILE)).unwrap();
+        let again = l.seal().unwrap();
+        assert_eq!(again.head_hash, first.head_hash);
+        assert_eq!(std::fs::read_to_string(dir.join(SIG_FILE)).unwrap(), sig);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

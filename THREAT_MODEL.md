@@ -42,7 +42,7 @@ physical seizure of the operator's host, cryptographic breaks of SHA-256.
 | AD2 co-option | **Drift scoring**: a second role scores exposure each step; drift ≥ threshold raises the alarm that triggers an early pull. | `harness/agent/` |
 | AD1 detection + AD2 dwell | **Short leash**: hard TTL plus fast trip conditions bound exposure. | `lifecycle/reaper/`, CLI loop |
 | AD3 mutation | **Hash chain**: an edit to a past entry breaks its `entry_hash` and every later `prev_hash`. | `core/ledger/` |
-| AD3 truncation | **Sealed head anchor** (`log-head.json`), created once and never rewritten; a sealed log cannot be reopened or re-anchored. | `core/ledger/` |
+| AD3 truncation | **Sealed head anchor** (`log-head.json`), created once and never rewritten; a sealed log cannot be reopened or re-anchored. Optionally **signed** with the node key (`log-head.sig`), so a reseal by a party without that key fails `verify_signed`. | `core/ledger/` |
 | A3 credential exposure on exit | **Self-wipe**: teardown overwrites the node's transient secrets and buffers before exit. | `lifecycle/reaper/` |
 | A1 bulk disclosure | **Privacy-by-fingerprint**: observed content is stored only as SHA-256. | `core/ledger/` |
 
@@ -66,7 +66,11 @@ Stated explicitly, because each of these is easy to assume from the names:
   party who can write the whole ledger directory can delete `ledger.jsonl` and
   `log-head.json`, rebuild a consistent chain, seal it, and pass verification. A
   deleted anchor is indistinguishable from a log that was never sealed, which is
-  why verification reports `UNSEALED` rather than `OK`.
+  why verification reports `UNSEALED` rather than `OK`. Signing the head with the
+  node key narrows this to parties without the key: they can still destroy the
+  store, but they cannot produce an anchor that `verify_signed` accepts. It does
+  not make the head complete — a log truncated *before* sealing and then signed
+  verifies, because the signature covers the entries that were there.
 - **The directory lock is advisory.** `Ledger::open` holds an exclusive lock on
   `<dir>/.lock` for the writer's lifetime, which stops a second `mnr` process
   from forking the chain. It does not stop any other program from appending,

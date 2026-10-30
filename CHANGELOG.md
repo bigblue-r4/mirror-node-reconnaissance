@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- The sealed head can be signed. `mnr demo --head-key <seed>` (any seed from
+  `mnr bundle keygen`) seals with the node key, writing `log-head.sig` beside the
+  anchor, and `mnr ledger verify --head-key <seed>` checks the anchor against that
+  key. This is the difference between an anchor anyone with write access to the
+  directory can rebuild and one that names the node: a consistent chain resealed
+  without the key now fails. It is attribution, not completeness — a log
+  truncated before sealing and then signed still verifies, which is what the
+  release notes already say about a producer signing the head it mints. Unsigned
+  seals verify exactly as before, and plain `verify` reports `signed` without
+  judging it, since it holds no key.
 - `mnr sparkle show` — prints an aggregate's format, entry kinds, probe count,
   exported root and anchor status without recomputing or checking anything, so an
   archived aggregate can be identified even when its probe directories are gone.

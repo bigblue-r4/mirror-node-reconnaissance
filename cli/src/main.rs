@@ -54,7 +54,8 @@ fn print_help() {
          mnr sparkle [--probes N] [--ttl-ms MS] [--dir <path>]   Run the multi-probe sparkle demo\n  \
          mnr sparkle verify [--dir <path>]   Recompute the aggregation from the probe ledgers and check the sealed chain\n  \
          mnr sparkle show [--dir <path>]   Print an aggregate's format and entry kinds, verifying nothing\n  \
-         mnr ledger verify [--dir <path>] Verify a witness log's integrity\n  \
+         mnr ledger verify [--dir <path>] [--head-key <file>]\n    \
+             Verify a witness log's integrity, optionally pinned to the node key\n  \
          mnr ledger show   [--dir <path>] Summarize a witness log\n  \
          mnr bundle keygen --out <file>  Mint an Ed25519 seed for the node or the exporter\n  \
          mnr bundle export --log <entries.ndjson> --out <bundle.ndjson>\n    \
@@ -67,13 +68,28 @@ fn print_help() {
 
 /// Pull `--dir <path>` out of args, if present.
 fn arg_dir(args: &[String]) -> Option<String> {
+    arg_value(args, "--dir")
+}
+
+/// Pull `--flag <value>` out of args, if present.
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--dir" {
+        if a == flag {
             return it.next().cloned();
         }
     }
     None
+}
+
+/// Load an Ed25519 seed written by `mnr bundle keygen`.
+///
+/// The same file already pins bundle exports, so sealing a head with it means one
+/// key names the node across both artifacts instead of two unrelated keys.
+fn load_head_key(path: &str) -> Result<mnr_bundle::SigningKey, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read head key {path}: {e}"))?;
+    mnr_bundle::from_seed_hex(text.trim()).map_err(|e| format!("invalid head key {path}: {e}"))
 }
 
 fn cmd_demo(args: &[String]) -> i32 {
@@ -104,7 +120,26 @@ fn cmd_demo(args: &[String]) -> i32 {
         cfg.swarm_len
     );
 
-    let mut ledger = match Ledger::open(&cfg.ledger_dir) {
+    // Sealing with a key is optional: without one the seal is byte-for-byte what
+    // it was before signing existed, and verification still passes — just with no
+    // attribution to the node.
+    let head_key = match arg_value(args, "--head-key")
+        .map(|path| load_head_key(&path))
+        .transpose()
+    {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("config error: {error}");
+            return 2;
+        }
+    };
+    let head_verifying = head_key.as_ref().map(|key| key.verifying_key());
+
+    let opened = match head_key {
+        Some(key) => Ledger::open_with_key(&cfg.ledger_dir, key),
+        None => Ledger::open(&cfg.ledger_dir),
+    };
+    let mut ledger = match opened {
         Ok(l) => l,
         Err(e) => {
             eprintln!("ledger error: {e}");
@@ -236,12 +271,17 @@ fn cmd_demo(args: &[String]) -> i32 {
 
     // Prove the witness log is intact and tamper-evident.
     println!("-- witness log verification --");
-    match Ledger::verify(&cfg.ledger_dir) {
+    let report = match &head_verifying {
+        Some(key) => Ledger::verify_signed(&cfg.ledger_dir, key),
+        None => Ledger::verify(&cfg.ledger_dir),
+    };
+    match report {
         Ok(r) => {
             println!(
-                "OK: {} entries, sealed={}, head={}…",
+                "OK: {} entries, sealed={}, signed={}, head={}…",
                 r.entries,
                 r.sealed,
+                r.signed,
                 &r.head_hash[..16.min(r.head_hash.len())]
             );
             println!(
@@ -281,6 +321,9 @@ fn apply_friction_args(cfg: &mut Config, args: &[String]) -> Result<(), String> 
             }
             "--dir" => {
                 args.next().ok_or("missing --dir value")?;
+            }
+            "--head-key" => {
+                args.next().ok_or("missing --head-key value")?;
             }
             _ => return Err(format!("unknown demo argument: {arg}")),
         }
@@ -484,11 +527,26 @@ fn cmd_ledger(args: &[String]) -> i32 {
                     .map(|c| c.ledger_dir)
                     .unwrap_or_else(|_| "./mnr-run".into())
             });
-            match Ledger::verify(&dir) {
+            let head_key = match arg_value(&args[1..], "--head-key")
+                .map(|path| load_head_key(&path))
+                .transpose()
+            {
+                Ok(key) => key,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 2;
+                }
+            };
+            let report = match &head_key {
+                Some(key) => Ledger::verify_signed(&dir, &key.verifying_key()),
+                None => Ledger::verify(&dir),
+            };
+            match report {
                 Ok(r) if r.sealed => {
                     println!(
-                        "OK: {} entries in {dir}, sealed=true, head={}…",
+                        "OK: {} entries in {dir}, sealed=true, signed={}, head={}…",
                         r.entries,
+                        r.signed,
                         &r.head_hash[..16.min(r.head_hash.len())]
                     );
                     0
@@ -511,7 +569,10 @@ fn cmd_ledger(args: &[String]) -> i32 {
             let dir = arg_dir(&args[1..]).unwrap_or_else(|| "./mnr-run".into());
             match Ledger::verify(&dir) {
                 Ok(r) => {
-                    println!("ledger {dir}: {} entries, sealed={}", r.entries, r.sealed);
+                    println!(
+                        "ledger {dir}: {} entries, sealed={}, signed={}",
+                        r.entries, r.sealed, r.signed
+                    );
                     0
                 }
                 Err(e) => {
@@ -521,7 +582,7 @@ fn cmd_ledger(args: &[String]) -> i32 {
             }
         }
         _ => {
-            eprintln!("usage: mnr ledger <verify|show> [--dir <path>]");
+            eprintln!("usage: mnr ledger <verify|show> [--dir <path>] [--head-key <file>]");
             2
         }
     }

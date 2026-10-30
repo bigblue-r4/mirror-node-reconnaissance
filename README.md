@@ -229,7 +229,11 @@ than "tamper-proof". This section is the short version of
   only SHA-256. A party who can write the whole directory can delete
   `ledger.jsonl` and `log-head.json`, rebuild a consistent chain, seal it and pass
   verification. Exporting the head to separate custody at seal time is what would
-  bind it; the repository does not do that step.
+  bind it; the repository does not do that step. Signing the head with the node
+  key (`mnr demo --head-key`, checked by `mnr ledger verify --head-key`) narrows
+  this: a chain rebuilt and resealed without that key fails verification. It is
+  attribution, not completeness — a log truncated before sealing and signed still
+  verifies.
 - **One writer per directory.** `Ledger::open` takes an exclusive advisory lock
   on `<dir>/.lock`, so two processes cannot append entries claiming the same
   position and fork the chain. A second writer fails immediately instead of
