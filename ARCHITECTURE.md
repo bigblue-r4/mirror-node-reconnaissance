@@ -99,7 +99,11 @@ Three limits are worth stating plainly, because they are easy to assume away:
 
 ## 3. The witness ledger
 
-`mnr-ledger` is an append-only JSONL log with a companion `log-head.json` anchor.
+`mnr-ledger` is an append-only JSONL log with a companion `log-head.json`
+anchor. Opening the directory takes an exclusive advisory lock on
+`<dir>/.lock`, held for the writer's lifetime: a store has one writer at a
+time, so two processes cannot append entries claiming the same position.
+Readers take no lock.
 
 - **Entry:** `{ seq, ts, kind, prev_hash, payload_fingerprint, entry_hash }`.
 - **Fingerprint, not plaintext.** Callers hand raw bytes to `append`; only the
