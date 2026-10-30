@@ -25,6 +25,20 @@ therefore cannot do is in [Limits](#limits), at the same level of detail.
 
 ---
 
+## Releases
+
+The current release is **v0.2.0** (2026-10-26). Three files answer three
+different questions about it:
+
+| If you want to know | Read |
+|---|---|
+| What changed, and what the release does *not* claim | [Release notes](RELEASE_NOTES_v0.2.0.md) |
+| What to do with logs, aggregates and bundles you already have | [UPGRADING.md](UPGRADING.md) |
+| Every change, including what has landed since the tag | [CHANGELOG.md](CHANGELOG.md) |
+
+Nothing here is a migration: a log written by 0.1.0 verifies unchanged. The one
+behaviour change is that a sealed directory can no longer be appended to.
+
 ## Two deployments it was built for
 
 The log is not a demo looking for a use. Two applications in this portfolio run
