@@ -119,8 +119,14 @@ second ledger, which verification recomputes:
 
 ```bash
 cargo run -p mnr-cli --bin mnr -- sparkle --probes 4 --dir ./sparkle-run
+cargo run -p mnr-cli --bin mnr -- sparkle show --dir ./sparkle-run     # what the artifact says about itself
 cargo run -p mnr-cli --bin mnr -- sparkle verify --dir ./sparkle-run   # exits 0
 ```
+
+`sparkle show` reads the aggregate and prints its format and entry kinds without
+recomputing or checking anything, so an archived aggregate can be identified even
+when its probe directories are gone. It is a description, not a result:
+`sparkle verify` is the check, and it still needs the probes.
 
 `sparkle verify` exits nonzero if a probe ledger fails or is unsealed, if a probe
 was swapped for a different (internally valid) ledger, if the aggregate chain was

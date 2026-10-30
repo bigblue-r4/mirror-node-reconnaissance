@@ -288,6 +288,8 @@ Consequences:
 - The layout is identifiable without verifying: the chain's first entry is the
   `sparkle-format` kind — a payload is stored as a fingerprint, so the kind says
   the chain is versioned — and the export copy spells out `sparkle-aggregate/2`.
+  `mnr sparkle show` prints both, plus the entry kinds and whether the anchor is
+  present, without recomputing anything or needing the probe directories.
   Neither existed before 0.2.0, so an aggregate with no marker is the old layout.
   A chain whose format entry names another layout is refused by name; see
   [UPGRADING.md](UPGRADING.md#aggregations-nothing-released-to-migrate).

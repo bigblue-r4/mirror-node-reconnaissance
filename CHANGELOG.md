@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `mnr sparkle show` — prints an aggregate's format, entry kinds, probe count,
+  exported root and anchor status without recomputing or checking anything, so an
+  archived aggregate can be identified even when its probe directories are gone.
+  It answers "which layout is this"; `sparkle verify` still answers "does it
+  hold", and is the only one of the two that is a result rather than a
+  description.
+
 ## [0.2.0] — 2026-10-26
 
 The court-export format gets its second version, a verifier written independently

@@ -587,6 +587,91 @@ impl SparkleController {
 // Verification
 // ============================================================================
 
+/// A read-only summary of an aggregate, for telling two artifacts apart without
+/// verifying either.
+///
+/// Nothing in here is checked: entry kinds are read from `ledger.jsonl` exactly as
+/// stored, and the root and format come from the export copy. That is the point —
+/// it answers "which layout is this?" for an aggregate whose probes may no longer
+/// be present at all.
+#[derive(Debug, Clone)]
+pub struct AggregateView {
+    /// Layout named by the export copy, when it carries one.
+    pub format: Option<String>,
+    /// Root echoed from the export copy. Never recomputed here.
+    pub exported_root: Option<String>,
+    pub entries: usize,
+    /// Lines of the chain that are not JSON.
+    pub unparseable: usize,
+    pub probes: usize,
+    /// Entry kinds in the order they first appear, with counts.
+    pub kinds: Vec<(String, usize)>,
+    /// Whether the aggregate ledger has a head anchor file.
+    pub anchored: bool,
+}
+
+impl AggregateView {
+    /// The layout as the artifact itself describes it.
+    pub fn layout(&self) -> &str {
+        match self.format.as_deref() {
+            Some(named) => named,
+            // No marker but a root entry: the description contradicts the chain.
+            None if self.kinds.iter().any(|(kind, _)| kind == "sparkle-root") => {
+                "unmarked, but the chain has a root entry"
+            }
+            None => "unmarked (pre-0.2.0 layout)",
+        }
+    }
+}
+
+/// Describe an aggregate without verifying it. Fails only when there is no chain
+/// to read.
+pub fn describe_aggregation(dir: &str) -> Result<AggregateView, String> {
+    let root_dir = PathBuf::from(dir);
+    let agg_dir = root_dir.join("aggregate");
+    let chain_path = agg_dir.join("ledger.jsonl");
+    let chain = fs::read_to_string(&chain_path)
+        .map_err(|e| format!("no aggregate ledger at {}: {e}", chain_path.display()))?;
+
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    let mut entries = 0usize;
+    let mut unparseable = 0usize;
+    for line in chain.lines().filter(|line| !line.trim().is_empty()) {
+        entries += 1;
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(entry) => {
+                let kind = entry["kind"].as_str().unwrap_or("<no kind>").to_string();
+                match kinds.iter_mut().find(|(seen, _)| *seen == kind) {
+                    Some((_, count)) => *count += 1,
+                    None => kinds.push((kind, 1)),
+                }
+            }
+            Err(_) => unparseable += 1,
+        }
+    }
+
+    let exported = fs::read_to_string(agg_dir.join("aggregate-root.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+
+    Ok(AggregateView {
+        format: exported
+            .as_ref()
+            .and_then(|meta| meta["format"].as_str().map(str::to_string)),
+        exported_root: exported
+            .as_ref()
+            .and_then(|meta| meta["aggregation_root"].as_str().map(str::to_string)),
+        entries,
+        unparseable,
+        // A published aggregate may arrive without its probe directories.
+        probes: probe_dirs(&root_dir)
+            .map(|probes| probes.len())
+            .unwrap_or(0),
+        kinds,
+        anchored: agg_dir.join("log-head.json").exists(),
+    })
+}
+
 /// Verify a sparkle aggregation end to end.
 ///
 /// The root is **recomputed** from the probe ledgers and then checked against the
@@ -1293,6 +1378,62 @@ mod tests {
             report.exported_format.as_deref(),
             Some("sparkle-aggregate/1")
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn describe_reads_the_layout_without_verifying() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+
+        let view = describe_aggregation(&dir.display().to_string()).unwrap();
+        assert_eq!(view.layout(), AGGREGATE_FORMAT);
+        assert_eq!(view.probes, 2);
+        assert_eq!(view.entries, 4);
+        assert_eq!(view.unparseable, 0);
+        assert!(view.anchored);
+        assert_eq!(
+            view.kinds,
+            vec![
+                ("sparkle-format".to_string(), 1),
+                ("sparkle-fragment".to_string(), 2),
+                ("sparkle-root".to_string(), 1),
+            ]
+        );
+        assert!(view.exported_root.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn describe_tells_a_legacy_aggregate_apart() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        rewrite_as_legacy(&dir);
+
+        let view = describe_aggregation(&dir.display().to_string()).unwrap();
+        assert_eq!(view.format, None);
+        assert_eq!(view.layout(), "unmarked (pre-0.2.0 layout)");
+        assert_eq!(view.entries, 2);
+        assert!(
+            view.kinds
+                .iter()
+                .all(|(kind, _)| kind == "sparkle-fragment"),
+            "a legacy chain has no format or root entry: {:?}",
+            view.kinds
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn describe_does_not_need_the_probe_ledgers() {
+        let dir = tmp_dir();
+        run_aggregation(&dir);
+        std::fs::remove_dir_all(dir.join("probes")).unwrap();
+
+        let view = describe_aggregation(&dir.display().to_string()).unwrap();
+        assert_eq!(view.layout(), AGGREGATE_FORMAT);
+        assert_eq!(view.probes, 0);
+        assert_eq!(view.entries, 4);
         std::fs::remove_dir_all(&dir).ok();
     }
 

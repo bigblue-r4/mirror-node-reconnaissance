@@ -97,6 +97,7 @@ longer needs a verification:
 - the aggregate chain's first entry has `"kind":"sparkle-format"`, visible in
   `aggregate/ledger.jsonl`. Payloads are stored only as fingerprints, so the kind
   says the chain is versioned and the export copy below says which version;
+  `mnr sparkle show --dir <path>` prints this without verifying anything;
 - `aggregate-root.json` carries `"format": "sparkle-aggregate/2"`.
 
 An aggregate written before the marker has neither, and that absence is the

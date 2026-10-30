@@ -5,6 +5,7 @@
 //!                   and verify the witness log.
 //!   sparkle         Run the sealed-lab multi-probe sparkle demo.
 //!   sparkle verify  Recompute the aggregation and check it against the sealed chain.
+//!   sparkle show    Print an aggregate's self-description, without verifying it.
 //!   ledger verify   Verify the integrity of a witness log on disk.
 //!   ledger show     Print a short summary of a witness log.
 //!   bundle keygen   Mint an Ed25519 seed file for the node or the exporter.
@@ -52,6 +53,7 @@ fn print_help() {
          Friction options: --inject-friction --friction-budget <1..1024> --friction-threshold <0..drift_threshold>\n  \
          mnr sparkle [--probes N] [--ttl-ms MS] [--dir <path>]   Run the multi-probe sparkle demo\n  \
          mnr sparkle verify [--dir <path>]   Recompute the aggregation from the probe ledgers and check the sealed chain\n  \
+         mnr sparkle show [--dir <path>]   Print an aggregate's format and entry kinds, verifying nothing\n  \
          mnr ledger verify [--dir <path>] Verify a witness log's integrity\n  \
          mnr ledger show   [--dir <path>] Summarize a witness log\n  \
          mnr bundle keygen --out <file>  Mint an Ed25519 seed for the node or the exporter\n  \
@@ -290,6 +292,9 @@ fn cmd_sparkle(args: &[String]) -> i32 {
     if let Some("verify") = args.first().map(String::as_str) {
         return cmd_sparkle_verify(&args[1..]);
     }
+    if let Some("show") = args.first().map(String::as_str) {
+        return cmd_sparkle_show(&args[1..]);
+    }
     let cfg = match sparkle::SparkleConfig::from_args(args) {
         Ok(c) => c,
         Err(e) => {
@@ -359,6 +364,74 @@ fn cmd_sparkle_verify(args: &[String]) -> i32 {
     } else {
         1
     }
+}
+
+/// Print what an aggregate says about itself. Reads the artifact only: no probe
+/// ledger is re-verified and no root is recomputed.
+fn cmd_sparkle_show(args: &[String]) -> i32 {
+    let mut dir = sparkle::SparkleConfig::default().dir;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dir" => match it.next() {
+                Some(value) => dir = value.clone(),
+                None => {
+                    eprintln!("usage: mnr sparkle show [--dir <path>]");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!(
+                    "unknown sparkle show argument: {other}\n\nusage: mnr sparkle show [--dir <path>]"
+                );
+                return 2;
+            }
+        }
+    }
+
+    let view = match sparkle::describe_aggregation(&dir) {
+        Ok(view) => view,
+        Err(e) => {
+            eprintln!("sparkle show: {e}");
+            return 1;
+        }
+    };
+
+    println!("== sparkle aggregate (inspection only: nothing below is verified) ==");
+    println!("dir        {dir}");
+    println!("format     {}", view.layout());
+    let kinds: Vec<String> = view
+        .kinds
+        .iter()
+        .map(|(kind, count)| format!("{kind} {count}"))
+        .collect();
+    println!("chain      {} entries: {}", view.entries, kinds.join(", "));
+    if view.unparseable > 0 {
+        println!(
+            "           {} line(s) of the chain are not JSON",
+            view.unparseable
+        );
+    }
+    println!("probes     {}", view.probes);
+    match &view.exported_root {
+        Some(root) => println!(
+            "root       {}…  (export copy; `mnr sparkle verify` recomputes it)",
+            &root[..16.min(root.len())]
+        ),
+        None => println!("root       no export copy"),
+    }
+    println!(
+        "anchor     {}",
+        if view.anchored {
+            "present"
+        } else {
+            "MISSING — truncation cannot be ruled out"
+        }
+    );
+    println!(
+        "\nThis is a description, not a result: `mnr sparkle verify --dir {dir}` is the check."
+    );
+    0
 }
 
 fn print_sparkle_report(report: &sparkle::VerifyReport) {
