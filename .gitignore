@@ -12,3 +12,6 @@
 # Python bytecode from tools/bundle-verify
 __pycache__/
 *.pyc
+
+# demo artifacts (throwaway keys, bundles and logs from demo/run.sh)
+/demo/out

@@ -149,6 +149,24 @@ when its probe directories are gone. It is a description, not a result:
 was swapped for a different (internally valid) ledger, if the aggregate chain was
 edited, or if the committed root disagrees with the recomputed one.
 
+### End to end, as a case file
+
+[`demo/run.sh`](demo/run.sh) runs these same components through a property-room
+custody log instead of the synthetic swarm: a case-scope bundle checked by the
+Python verifier under two pins, an edit inside the issued bundle, a dishonest
+re-export that verification accepts and only the retained head catches, a signed
+seal against a wholesale rebuild, and the mutation, truncation and aggregation
+failures above. Six acts, each ending in an exit code rather than a claim, in
+about thirty seconds:
+
+```bash
+./demo/run.sh      # artifacts kept in demo/out/
+```
+
+The custody records are fictional; the binaries, keys, signatures and verifier
+are the ones in this repository. The talk track, the questions it invites, and
+what it deliberately does not prove are in [demo/DEMO.md](demo/DEMO.md).
+
 ## Export a bundle
 
 `mnr bundle export` writes `witness-bundle/2` from a whole-log file in the store
